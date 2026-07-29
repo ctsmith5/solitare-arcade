@@ -1,0 +1,252 @@
+/* ==================================================================
+   Playing card faces and backs.
+   Everything scales off --card-w / --card-h so a card looks identical
+   at any size. Only .card-* classes live here.
+   ================================================================== */
+
+.card-face {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background:
+    radial-gradient(ellipse 120% 80% at 50% 0%, #ffffff 0%, #fbf9f2 55%, #f2eee1 100%);
+  font-family: Georgia, 'Times New Roman', serif;
+  line-height: 1;
+  overflow: hidden;
+}
+
+/* Hairline inner border + soft sheen. */
+.card-face::after {
+  content: '';
+  position: absolute;
+  inset: calc(var(--card-w) * 0.028);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: calc(var(--card-w) * 0.05);
+  pointer-events: none;
+}
+
+.card-face::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(148deg, rgba(255, 255, 255, 0.9) 0%, transparent 42%);
+  pointer-events: none;
+  opacity: 0.55;
+}
+
+.card-red {
+  --pip-color: #c0182c;
+  --pip-shadow: rgba(192, 24, 44, 0.24);
+}
+
+.card-black {
+  --pip-color: #14141c;
+  --pip-shadow: rgba(0, 0, 0, 0.26);
+}
+
+/* ---------- corner indices ---------------------------------------- */
+
+.card-index {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: calc(var(--card-w) * 0.012);
+  color: var(--pip-color);
+  z-index: 3;
+  font-weight: 700;
+}
+
+.card-index-tl {
+  top: calc(var(--card-h) * 0.038);
+  left: calc(var(--card-w) * 0.055);
+}
+
+.card-index-br {
+  bottom: calc(var(--card-h) * 0.038);
+  right: calc(var(--card-w) * 0.055);
+  transform: rotate(180deg);
+}
+
+/*
+ * Real cards keep the index in a narrow column so it clears the pip field.
+ * "10" is the widest label, hence the negative tracking.
+ */
+.card-index-rank {
+  font-size: calc(var(--card-w) * 0.168);
+  letter-spacing: -0.07em;
+}
+
+.card-index-rank.is-wide {
+  transform: scaleX(0.74);
+}
+
+.card-index-suit {
+  font-size: calc(var(--card-w) * 0.118);
+  line-height: 0.9;
+}
+
+/* ---------- centre pip area --------------------------------------- */
+
+/*
+ * Pip columns sit at 26% / 50% / 74% of the card width and the outer rows at
+ * 15% / 85% of its height — the proportions of a real deck.
+ */
+.card-center {
+  position: absolute;
+  left: 28%;
+  right: 28%;
+  top: 15%;
+  bottom: 15%;
+  z-index: 2;
+}
+
+.card-pips {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.card-pip {
+  position: absolute;
+  font-size: calc(var(--card-w) * 0.235);
+  line-height: 1;
+  color: var(--pip-color);
+  text-shadow: 0 1px 0 var(--pip-shadow);
+  /* transform is set inline so lower-half pips can be rotated 180deg */
+}
+
+/* The ace gets one oversized centre pip. */
+.card-pips.is-ace .card-pip {
+  font-size: calc(var(--card-w) * 0.66);
+}
+
+/* ---------- court cards ------------------------------------------- */
+
+/* The court panel is inset from the card itself so it clears the indices. */
+.card-court {
+  position: absolute;
+  inset: calc(var(--card-h) * 0.1) calc(var(--card-w) * 0.2);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  border: calc(var(--card-w) * 0.018) solid var(--pip-color);
+  border-radius: calc(var(--card-w) * 0.045);
+  background: linear-gradient(160deg, #fffdf6 0%, #f6f0dd 48%, #efe6cd 100%);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.85);
+  overflow: hidden;
+}
+
+/* The inner double rule. */
+.card-court::before {
+  content: '';
+  position: absolute;
+  inset: calc(var(--card-w) * 0.038);
+  border: 1px solid var(--pip-color);
+  border-radius: calc(var(--card-w) * 0.03);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.card-court-half {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--card-h) * 0.014);
+  min-height: 0;
+  padding: calc(var(--card-h) * 0.018) 0;
+}
+
+/* The lower half is printed upside down, like a real court card. */
+.card-court-half:last-child {
+  transform: rotate(180deg);
+}
+
+.card-court-caption {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--card-w) * 0.045);
+}
+
+.card-court-letter {
+  font-size: calc(var(--card-w) * 0.24);
+  font-weight: 700;
+  line-height: 1;
+  color: var(--pip-color);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.card-court-suit {
+  font-size: calc(var(--card-w) * 0.17);
+  line-height: 1;
+  color: var(--pip-color);
+}
+
+.card-motif {
+  width: calc(var(--card-w) * 0.4);
+  height: calc(var(--card-w) * 0.4);
+  flex: none;
+}
+
+.card-court-rule {
+  height: calc(var(--card-w) * 0.016);
+  flex: none;
+  background: var(--pip-color);
+  opacity: 0.62;
+}
+
+/* ---------- card back --------------------------------------------- */
+
+.card-back {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(150deg, #2a3f8f 0%, #1a2560 45%, #131a45 100%);
+  overflow: hidden;
+}
+
+.card-back-frame {
+  position: absolute;
+  inset: calc(var(--card-w) * 0.055);
+  border: calc(var(--card-w) * 0.022) solid rgba(180, 205, 255, 0.55);
+  border-radius: calc(var(--card-w) * 0.045);
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 0 1px rgba(10, 16, 48, 0.9),
+    0 0 calc(var(--card-w) * 0.1) rgba(0, 0, 0, 0.4);
+}
+
+/* Diamond lattice, built from two crossed stripe gradients. */
+.card-back-pattern {
+  position: absolute;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(
+      45deg,
+      rgba(150, 185, 255, 0.34) 0 1px,
+      transparent 1px calc(var(--card-w) * 0.085)
+    ),
+    repeating-linear-gradient(
+      -45deg,
+      rgba(150, 185, 255, 0.34) 0 1px,
+      transparent 1px calc(var(--card-w) * 0.085)
+    ),
+    radial-gradient(circle at 50% 50%, rgba(90, 130, 235, 0.5) 0%, transparent 70%);
+}
+
+.card-back-emblem {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-back-emblem svg {
+  width: calc(var(--card-w) * 0.42);
+  height: calc(var(--card-w) * 0.42);
+  filter: drop-shadow(0 0 calc(var(--card-w) * 0.03) rgba(120, 170, 255, 0.8));
+}

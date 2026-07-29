@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# builds
+frontend/dist/
+backend/backend
+backend/static/
+
+# SQLite database and its write-ahead log
+*.db
+*.db-shm
+*.db-wal
+
+# editors / OS
+.DS_Store
+*.local
+.vscode/
+.idea/
+
+# TS incremental build cache
+frontend/tsconfig.tsbuildinfo
