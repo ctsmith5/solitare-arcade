@@ -21,7 +21,7 @@ export const DIFFICULTY_BONUS: Record<Difficulty, number> = {
 }
 
 /** The games the arcade offers. Must match the backend's accepted values. */
-export type GameKey = 'solitaire' | 'sudoku'
+export type GameKey = 'solitaire' | 'sudoku' | 'wordle'
 
 export interface GameSpec {
   key: GameKey
@@ -44,9 +44,15 @@ export const GAMES: Record<GameKey, GameSpec> = {
     tagline: 'ONE SOLUTION · NO GUESSING',
     short: 'SUD',
   },
+  wordle: {
+    key: 'wordle',
+    title: 'WORDLE',
+    tagline: 'FIVE LETTERS · SIX TRIES',
+    short: 'WRD',
+  },
 }
 
-export const GAME_ORDER: GameKey[] = ['solitaire', 'sudoku']
+export const GAME_ORDER: GameKey[] = ['solitaire', 'sudoku', 'wordle']
 
 /**
  * What a difficulty means in each game. Solitaire varies the deal; Sudoku
@@ -62,5 +68,10 @@ export const DIFFICULTY_BLURB: Record<GameKey, Record<Difficulty, string>> = {
     easy: '36-45 starting cells',
     medium: '30-35 starting cells',
     hard: '25-29 starting cells',
+  },
+  wordle: {
+    easy: 'Seven tries',
+    medium: 'Six tries',
+    hard: 'Six tries, must use hints',
   },
 }

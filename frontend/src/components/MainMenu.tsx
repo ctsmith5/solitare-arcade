@@ -219,7 +219,9 @@ export function MainMenu({ onStart }: Props) {
         <div className="credit-line">
           {game === 'solitaire'
             ? 'DRAG CARDS · DOUBLE-CLICK TO SEND HOME · H FOR HINT'
-            : 'CLICK A CELL · 1-9 TO FILL · N FOR NOTES · H FOR HINT'}
+            : game === 'sudoku'
+              ? 'CLICK A CELL · 1-9 TO FILL · N FOR NOTES · H FOR HINT'
+              : 'TYPE A WORD · ENTER TO GUESS · GREEN RIGHT · YELLOW MISPLACED'}
         </div>
       </div>
       </div>

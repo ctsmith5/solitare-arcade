@@ -1,8 +1,9 @@
 # 🕹 Arcade
 
-Two games — **Klondike Solitaire** (draw one, 52-card deck, drag and drop) and
-**Sudoku** (uniquely-solvable puzzles, three difficulties) — sharing one player
-roster, one score model and one arcade-cabinet shell, on a Go + Postgres backend.
+Three games — **Klondike Solitaire** (draw one, 52-card deck, drag and drop),
+**Sudoku** (uniquely-solvable puzzles) and **Wordle** (five letters, six tries) —
+sharing one player roster, one score model and one arcade-cabinet shell, on a
+Go + Postgres backend.
 
 ```
 solitare/
@@ -13,7 +14,7 @@ solitare/
 │   └── *_test.go     store + endpoint tests
 └── frontend/         React 18 + TypeScript + Vite
     └── src/
-        ├── game/     solitaire engine, sudoku engine, drag controller, sound
+        ├── game/     one engine per game, word lists, drag controller, sound
         ├── components/  menu, board, cards, HUD, leaderboard, win screen
         ├── api/       typed client for the Go API
         └── styles/    arcade shell + playing-card artwork
@@ -208,6 +209,52 @@ out yourself**. Without that scaling, hint-spamming is the highest-scoring
 strategy — the per-hint penalty floors at zero while a fast finish pays a bonus
 that dwarfs everything else. A grid you revealed entirely earns no time bonus.
 
+### Wordle
+
+| Action | Control |
+| --- | --- |
+| Type a letter | Any letter key, or the on-screen keyboard |
+| Guess | <kbd>Enter</kbd> |
+| Delete | <kbd>Backspace</kbd> |
+
+Green means right letter, right place; yellow means right letter, wrong place.
+Difficulty changes the number of tries and whether **hard mode** applies — easy
+gives seven, medium six, hard six plus the rule that every revealed hint must be
+reused in later guesses.
+
+**Word lists.** Two of them, for the reason every Wordle clone eventually
+discovers: the set of words you should *accept* is much larger than the set you
+should *ask for*. `GUESSES` is every five-letter word in the system dictionary
+(Webster's 1913 via `/usr/share/dict/words`, public domain) so reasonable guesses
+are not rejected; `ANSWERS` is a curated list of ordinary words, because being
+asked to find `fubsy` or `vealy` is not a game. Regenerate with the script in
+`src/game/words.ts`'s header comment.
+
+**Marking duplicate letters** is where naive implementations break, so it is done
+in the standard two passes: exact matches are marked first and consume their
+letter from a pool, then remaining letters are marked yellow only while the pool
+still holds one.
+
+Worked example — answer `geese`, guess `eexxe` → `present correct absent absent
+correct`. Two of the answer's three `e`s are matched exactly at indices 1 and 4;
+the third, at index 2, is what backs the yellow at index 0. Get the bookkeeping
+wrong and you either over-report yellows or lose that one.
+
+The invariant the tests pin, from both directions, is that for every letter the
+count of `correct` + `present` marks equals `min(count in guess, count in
+answer)` — so neither over- nor under-reporting can slip through.
+
+**Wordle scoring**
+
+| Event | Points |
+| --- | --- |
+| Solving it | +300, plus `900 − (guesses − 1) × 130` |
+| Each newly confirmed green | +40 |
+| Each newly confirmed yellow | +15 |
+
+Positions only pay once, so re-guessing the same word cannot farm points. Time
+bonus is `min(900, 120000 / seconds)` on a win of at least 20 seconds.
+
 ### Solitaire scoring
 
 | Event | Points |
@@ -256,7 +303,7 @@ scores(id, player_id → players.id, game, score, moves, duration_seconds, won, 
   UNIQUE (player_id, game)
 ```
 
-`game` is `solitaire` or `sudoku`. The unique constraint is what enforces
+`game` is `solitaire`, `sudoku` or `wordle`. The unique constraint is what enforces
 "personal bests only" — submissions upsert with
 `ON CONFLICT (player_id, game) DO UPDATE ... WHERE EXCLUDED.score > scores.score`,
 so a weaker run matches no row and writes nothing.

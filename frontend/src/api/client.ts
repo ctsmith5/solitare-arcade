@@ -13,7 +13,7 @@ export interface Player {
 
 export type Difficulty = 'easy' | 'medium' | 'hard'
 
-export type GameKey = 'solitaire' | 'sudoku'
+export type GameKey = 'solitaire' | 'sudoku' | 'wordle'
 
 /** One row of the arcade table: a player, ranked on their combined total. */
 export interface LeaderboardEntry {

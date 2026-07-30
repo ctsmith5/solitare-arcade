@@ -1,0 +1,226 @@
+/* ==================================================================
+   WORDLE — guess grid and on-screen keyboard
+   ================================================================== */
+
+.wordle-table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px clamp(12px, 3vw, 40px) 32px;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 0%, rgba(168, 85, 247, 0.16), transparent 70%),
+    linear-gradient(165deg, #2a1a4a 0%, #150d2c 55%, #0a0618 100%);
+  box-shadow: inset 0 0 140px rgba(0, 0, 0, 0.72);
+}
+
+.wordle-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: clamp(10px, 2vh, 22px);
+  margin: 0 auto;
+  width: fit-content;
+}
+
+/* ---------- guess grid -------------------------------------------- */
+
+.wordle-grid {
+  /* Height-aware: easy mode adds a seventh row, and the keyboard still has to
+     fit under it without the board scrolling. */
+  --tile: clamp(30px, min(9vmin, 7vh), 54px);
+  display: grid;
+  grid-template-columns: repeat(5, var(--tile));
+  gap: 6px;
+}
+
+.wordle-tile {
+  width: var(--tile);
+  height: var(--tile);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-arcade);
+  font-size: calc(var(--tile) * 0.42);
+  line-height: 1;
+  color: var(--ink);
+  background: rgba(10, 8, 26, 0.85);
+  border: 2px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  user-select: none;
+}
+
+/* A letter typed but not yet submitted. */
+.wordle-tile.filled {
+  border-color: rgba(255, 255, 255, 0.45);
+  animation: tile-pop 0.1s ease;
+}
+
+@keyframes tile-pop {
+  50% {
+    transform: scale(1.08);
+  }
+}
+
+.wordle-tile.correct {
+  color: #06210c;
+  background: var(--neon-green);
+  border-color: var(--neon-green);
+  box-shadow: 0 0 18px rgba(57, 255, 20, 0.5);
+}
+
+.wordle-tile.present {
+  color: #2a1f00;
+  background: var(--neon-yellow);
+  border-color: var(--neon-yellow);
+  box-shadow: 0 0 18px rgba(255, 212, 0, 0.45);
+}
+
+.wordle-tile.absent {
+  color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Reveal each tile in turn, like flipping a card over. */
+.wordle-row.revealed .wordle-tile {
+  animation: tile-flip 0.5s ease backwards;
+}
+.wordle-row.revealed .wordle-tile:nth-child(1) { animation-delay: 0s; }
+.wordle-row.revealed .wordle-tile:nth-child(2) { animation-delay: 0.1s; }
+.wordle-row.revealed .wordle-tile:nth-child(3) { animation-delay: 0.2s; }
+.wordle-row.revealed .wordle-tile:nth-child(4) { animation-delay: 0.3s; }
+.wordle-row.revealed .wordle-tile:nth-child(5) { animation-delay: 0.4s; }
+
+@keyframes tile-flip {
+  0% {
+    transform: rotateX(0);
+  }
+  50% {
+    transform: rotateX(90deg);
+  }
+  100% {
+    transform: rotateX(0);
+  }
+}
+
+.wordle-row {
+  display: contents;
+}
+
+/* A rejected word — not in the list, or breaking hard mode. */
+.wordle-grid.shake .wordle-row.active .wordle-tile {
+  animation: row-shake 0.4s ease;
+}
+
+@keyframes row-shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-6px);
+  }
+  40% {
+    transform: translateX(6px);
+  }
+  60% {
+    transform: translateX(-4px);
+  }
+  80% {
+    transform: translateX(4px);
+  }
+}
+
+/* ---------- keyboard ---------------------------------------------- */
+
+.wordle-keyboard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(520px, 96vw);
+}
+
+.kb-row {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+}
+
+.kb-key {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 12px 2px;
+  font-family: var(--font-arcade);
+  font-size: 11px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  transition:
+    background 0.12s ease,
+    transform 0.06s ease;
+}
+
+.kb-key:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.kb-key:active:not(:disabled) {
+  transform: translateY(2px);
+}
+
+.kb-key:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kb-key.wide {
+  flex: 1.6 1 0;
+  font-size: 8px;
+}
+
+/* Centre the drawn glyph the way the text keys centre theirs. */
+.kb-icon {
+  margin: 0 auto;
+  filter: none;
+}
+
+.kb-key.correct {
+  color: #06210c;
+  background: var(--neon-green);
+  border-color: var(--neon-green);
+}
+
+.kb-key.present {
+  color: #2a1f00;
+  background: var(--neon-yellow);
+  border-color: var(--neon-yellow);
+}
+
+.kb-key.absent {
+  color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.07);
+}
+
+/* ---------- messages ---------------------------------------------- */
+
+.wordle-message {
+  min-height: 22px;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  color: var(--neon-magenta);
+  text-shadow: 0 0 12px rgba(255, 46, 151, 0.6);
+  text-align: center;
+}
+
+.wordle-answer {
+  font-size: 13px;
+  letter-spacing: 0.28em;
+  color: var(--neon-yellow);
+  text-shadow: 0 0 14px rgba(255, 212, 0, 0.6);
+}
+
+.game-wordle {
+  --accent: var(--neon-yellow);
+}

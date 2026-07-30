@@ -206,7 +206,7 @@ func NormalizeDifficulty(raw string) string {
 
 // Games the cabinet knows about. Unknown values fall back to solitaire rather
 // than being rejected, for the same reason as difficulty: the run is over.
-var validGames = map[string]bool{"solitaire": true, "sudoku": true}
+var validGames = map[string]bool{"solitaire": true, "sudoku": true, "wordle": true}
 
 func NormalizeGame(raw string) string {
 	value := strings.ToLower(strings.TrimSpace(raw))
