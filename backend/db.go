@@ -1,119 +1,113 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/jackc/pgx/v5/pgconn"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// Store wraps the SQLite connection and all query logic for the arcade.
+// Store wraps the Postgres connection and all query logic for the arcade.
 type Store struct {
 	db *sql.DB
 }
 
 const schema = `
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
 CREATE TABLE IF NOT EXISTS players (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT NOT NULL COLLATE NOCASE UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    id         BIGSERIAL PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS scores (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id        INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    id               BIGSERIAL PRIMARY KEY,
+    player_id        BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     score            INTEGER NOT NULL,
     moves            INTEGER NOT NULL DEFAULT 0,
     duration_seconds INTEGER NOT NULL DEFAULT 0,
-    won              INTEGER NOT NULL DEFAULT 0,
-    difficulty       TEXT NOT NULL DEFAULT 'medium',
-    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+    won              BOOLEAN NOT NULL DEFAULT FALSE,
+    difficulty       TEXT    NOT NULL DEFAULT 'medium',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_scores_score ON scores(score DESC);
 CREATE INDEX IF NOT EXISTS idx_scores_player ON scores(player_id);
 `
 
-func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+// Columns added after the first release. Postgres supports IF NOT EXISTS here,
+// so replaying these on an up-to-date database is a no-op.
+var migrations = []string{
+	`ALTER TABLE scores ADD COLUMN IF NOT EXISTS difficulty TEXT NOT NULL DEFAULT 'medium'`,
+}
+
+// OpenStore connects to Postgres and brings the schema up to date.
+//
+// dsn is a standard connection URL — on Railway that is the DATABASE_URL the
+// Postgres service publishes.
+func OpenStore(dsn string) (*Store, error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, errors.New("no database URL configured (set DATABASE_URL)")
+	}
+
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	// SQLite handles a single writer at a time; keep the pool small and honest.
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
+	if err := waitForDB(db, 30*time.Second); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	if err := addMissingColumns(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
 	}
 	return &Store{db: db}, nil
 }
 
-// addMissingColumns brings a database created by an older build up to date.
-// CREATE TABLE IF NOT EXISTS leaves existing tables alone, so new columns have
-// to be added explicitly.
-func addMissingColumns(db *sql.DB) error {
-	added := []struct{ table, column, ddl string }{
-		{"scores", "difficulty", `ALTER TABLE scores ADD COLUMN difficulty TEXT NOT NULL DEFAULT 'medium'`},
-	}
-	for _, c := range added {
-		has, err := hasColumn(db, c.table, c.column)
-		if err != nil {
-			return err
-		}
-		if has {
-			continue
-		}
-		if _, err := db.Exec(c.ddl); err != nil {
-			return fmt.Errorf("add %s.%s: %w", c.table, c.column, err)
-		}
-	}
-	return nil
-}
+// waitForDB gives the database a chance to come up. Platforms often start the
+// app before its database is accepting connections, and dying immediately turns
+// an ordinary cold start into a crash loop.
+func waitForDB(db *sql.DB, limit time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
 
-func hasColumn(db *sql.DB, table, column string) (bool, error) {
-	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
+	var lastErr error
+	for {
+		if err := db.PingContext(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
 		}
-		if name == column {
-			return true, rows.Err()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("database unreachable after %s: %w", limit, lastErr)
+		case <-time.After(time.Second):
 		}
 	}
-	return false, rows.Err()
-}
-
-// Difficulties the cabinet accepts; anything else falls back to medium.
-var validDifficulties = map[string]bool{"easy": true, "medium": true, "hard": true}
-
-// NormalizeDifficulty keeps unknown values out of the database without
-// rejecting a run the player already finished.
-func NormalizeDifficulty(raw string) string {
-	value := strings.ToLower(strings.TrimSpace(raw))
-	if validDifficulties[value] {
-		return value
-	}
-	return "medium"
 }
 
 func (s *Store) Close() error { return s.db.Close() }
+
+// isUniqueViolation reports whether err is Postgres' unique_violation (23505).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 // ---- models -------------------------------------------------------------
 
@@ -159,6 +153,9 @@ var (
 
 // NormalizeName trims, collapses whitespace and upper-cases the handle so the
 // leaderboard reads like a real cabinet. Returns ErrInvalidName if unusable.
+//
+// Because every stored name is upper-cased, a plain UNIQUE constraint gives
+// case-insensitive handles without needing a citext column.
 func NormalizeName(raw string) (string, error) {
 	name := strings.ToUpper(strings.Join(strings.Fields(raw), " "))
 	if len(name) < 1 || len([]rune(name)) > 12 {
@@ -173,15 +170,30 @@ func NormalizeName(raw string) (string, error) {
 	return name, nil
 }
 
+// Difficulties the cabinet accepts; anything else falls back to medium.
+var validDifficulties = map[string]bool{"easy": true, "medium": true, "hard": true}
+
+// NormalizeDifficulty keeps unknown values out of the database without
+// rejecting a run the player already finished.
+func NormalizeDifficulty(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if validDifficulties[value] {
+		return value
+	}
+	return "medium"
+}
+
+const timestampLayout = time.RFC3339
+
 // ---- players ------------------------------------------------------------
 
 const playerSelect = `
 SELECT p.id,
        p.name,
        p.created_at,
-       COALESCE(MAX(s.score), 0)                        AS best_score,
-       COALESCE(SUM(CASE WHEN s.won = 1 THEN 1 END), 0) AS games_won,
-       COUNT(s.id)                                      AS games_played
+       COALESCE(MAX(s.score), 0)        AS best_score,
+       COUNT(*) FILTER (WHERE s.won)    AS games_won,
+       COUNT(s.id)                      AS games_played
 FROM players p
 LEFT JOIN scores s ON s.player_id = p.id
 `
@@ -190,10 +202,14 @@ func scanPlayers(rows *sql.Rows) ([]Player, error) {
 	defer rows.Close()
 	players := []Player{}
 	for rows.Next() {
-		var p Player
-		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt, &p.BestScore, &p.GamesWon, &p.Games); err != nil {
+		var (
+			p       Player
+			created time.Time
+		)
+		if err := rows.Scan(&p.ID, &p.Name, &created, &p.BestScore, &p.GamesWon, &p.Games); err != nil {
 			return nil, err
 		}
+		p.CreatedAt = created.UTC().Format(timestampLayout)
 		players = append(players, p)
 	}
 	return players, rows.Err()
@@ -210,7 +226,7 @@ ORDER BY best_score DESC, p.name ASC`)
 }
 
 func (s *Store) GetPlayer(id int64) (*Player, error) {
-	rows, err := s.db.Query(playerSelect+`WHERE p.id = ? GROUP BY p.id`, id)
+	rows, err := s.db.Query(playerSelect+`WHERE p.id = $1 GROUP BY p.id`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -224,8 +240,19 @@ func (s *Store) GetPlayer(id int64) (*Player, error) {
 	return &players[0], nil
 }
 
-func (s *Store) GetPlayerByName(name string) (*Player, error) {
-	rows, err := s.db.Query(playerSelect+`WHERE p.name = ? COLLATE NOCASE GROUP BY p.id`, name)
+// GetPlayerByName finds a handle however the caller cased or spaced it.
+//
+// Stored names are always normalized, so normalizing the needle the same way
+// makes an exact match case-insensitive — the job SQLite's COLLATE NOCASE used
+// to do, and it collapses stray whitespace too. A name that cannot normalize
+// could never have been stored, so it is simply not found.
+func (s *Store) GetPlayerByName(raw string) (*Player, error) {
+	name, err := NormalizeName(raw)
+	if err != nil {
+		return nil, ErrPlayerNotFound
+	}
+
+	rows, err := s.db.Query(playerSelect+`WHERE p.name = $1 GROUP BY p.id`, name)
 	if err != nil {
 		return nil, err
 	}
@@ -245,16 +272,15 @@ func (s *Store) CreatePlayer(raw string) (*Player, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.db.Exec(`INSERT INTO players (name, created_at) VALUES (?, ?)`,
-		name, time.Now().UTC().Format(time.RFC3339))
+
+	var id int64
+	err = s.db.QueryRow(
+		`INSERT INTO players (name) VALUES ($1) RETURNING id`, name,
+	).Scan(&id)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+		if isUniqueViolation(err) {
 			return nil, ErrPlayerExists
 		}
-		return nil, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
 		return nil, err
 	}
 	return s.GetPlayer(id)
@@ -266,30 +292,27 @@ func (s *Store) AddScore(playerID int64, score, moves, duration int, won bool, d
 	if _, err := s.GetPlayer(playerID); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.Exec(
-		`INSERT INTO scores (player_id, score, moves, duration_seconds, won, difficulty, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		playerID, score, moves, duration, boolToInt(won), NormalizeDifficulty(difficulty), now)
-	if err != nil {
-		return nil, err
-	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		return nil, err
-	}
 
-	var out Score
-	var wonInt int
-	err = s.db.QueryRow(`
-SELECT s.id, s.player_id, p.name, s.score, s.moves, s.duration_seconds, s.won, s.difficulty, s.created_at
-FROM scores s JOIN players p ON p.id = s.player_id
-WHERE s.id = ?`, id).Scan(&out.ID, &out.PlayerID, &out.PlayerName, &out.Score,
-		&out.Moves, &out.Duration, &wonInt, &out.Difficulty, &out.CreatedAt)
+	var (
+		out     Score
+		created time.Time
+	)
+	err := s.db.QueryRow(`
+INSERT INTO scores (player_id, score, moves, duration_seconds, won, difficulty)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, player_id, score, moves, duration_seconds, won, difficulty, created_at`,
+		playerID, score, moves, duration, won, NormalizeDifficulty(difficulty),
+	).Scan(&out.ID, &out.PlayerID, &out.Score, &out.Moves, &out.Duration,
+		&out.Won, &out.Difficulty, &created)
 	if err != nil {
 		return nil, err
 	}
-	out.Won = wonInt == 1
+	out.CreatedAt = created.UTC().Format(timestampLayout)
+
+	if err := s.db.QueryRow(`SELECT name FROM players WHERE id = $1`, playerID).
+		Scan(&out.PlayerName); err != nil {
+		return nil, err
+	}
 	return &out, nil
 }
 
@@ -304,7 +327,7 @@ SELECT s.player_id, p.name, s.score, s.moves, s.duration_seconds, s.won, s.diffi
 FROM scores s
 JOIN players p ON p.id = s.player_id
 ORDER BY s.score DESC, s.duration_seconds ASC, s.created_at ASC
-LIMIT ?`, limit)
+LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -315,12 +338,12 @@ LIMIT ?`, limit)
 	for rows.Next() {
 		rank++
 		e := LeaderboardEntry{Rank: rank}
-		var wonInt int
+		var created time.Time
 		if err := rows.Scan(&e.PlayerID, &e.PlayerName, &e.Score, &e.Moves,
-			&e.Duration, &wonInt, &e.Difficulty, &e.CreatedAt); err != nil {
+			&e.Duration, &e.Won, &e.Difficulty, &created); err != nil {
 			return nil, err
 		}
-		e.Won = wonInt == 1
+		e.CreatedAt = created.UTC().Format(timestampLayout)
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
@@ -333,9 +356,9 @@ func (s *Store) PlayerScores(playerID int64, limit int) ([]Score, error) {
 	rows, err := s.db.Query(`
 SELECT s.id, s.player_id, p.name, s.score, s.moves, s.duration_seconds, s.won, s.difficulty, s.created_at
 FROM scores s JOIN players p ON p.id = s.player_id
-WHERE s.player_id = ?
+WHERE s.player_id = $1
 ORDER BY s.score DESC, s.created_at DESC
-LIMIT ?`, playerID, limit)
+LIMIT $2`, playerID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -344,20 +367,13 @@ LIMIT ?`, playerID, limit)
 	out := []Score{}
 	for rows.Next() {
 		var sc Score
-		var wonInt int
+		var created time.Time
 		if err := rows.Scan(&sc.ID, &sc.PlayerID, &sc.PlayerName, &sc.Score,
-			&sc.Moves, &sc.Duration, &wonInt, &sc.Difficulty, &sc.CreatedAt); err != nil {
+			&sc.Moves, &sc.Duration, &sc.Won, &sc.Difficulty, &created); err != nil {
 			return nil, err
 		}
-		sc.Won = wonInt == 1
+		sc.CreatedAt = created.UTC().Format(timestampLayout)
 		out = append(out, sc)
 	}
 	return out, rows.Err()
-}
-
-func boolToInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

@@ -1,11 +1,11 @@
 # 🕹 Solitaire Arcade
 
 Klondike Solitaire (draw one, standard 52-card deck) with drag-and-drop play,
-a Go + SQLite backend for players and scores, and an arcade-cabinet front end.
+a Go + Postgres backend for players and scores, and an arcade-cabinet front end.
 
 ```
 solitare/
-├── backend/          Go API + SQLite store
+├── backend/          Go API + Postgres store
 │   ├── main.go       server, graceful shutdown, optional static hosting
 │   ├── db.go         schema, queries, name normalisation
 │   ├── handlers.go   HTTP routes, CORS, JSON helpers
@@ -20,10 +20,17 @@ solitare/
 
 ## Running it
 
-Two terminals. **Backend** (defaults to `:8080`, creates `arcade.db` on first run):
+You need a Postgres to point at. The quickest local one:
 
 ```bash
-cd backend && go run .
+docker run -d --name solitaire-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_USER=dev -e POSTGRES_DB=solitaire -p 5432:5432 postgres:16-alpine
+```
+
+Then two terminals. **Backend** (defaults to `:8080`, creates its tables on
+first run):
+
+```bash
+cd backend && DATABASE_URL='postgres://dev:dev@localhost:5432/solitaire?sslmode=disable' go run .
 ```
 
 **Frontend** (Vite dev server on `:5173`, proxies `/api` to the backend):
@@ -37,7 +44,8 @@ Then open <http://localhost:5173>.
 ### Single-binary deploy
 
 Build the front end into the backend's `static/` directory and the Go server
-will host both the API and the app:
+will host both the API and the app. Because everything is same-origin, the
+frontend's relative `/api` calls just work and no `VITE_API_URL` is needed:
 
 ```bash
 cd frontend && npm run build && cp -r dist ../backend/static
@@ -46,9 +54,16 @@ cd ../backend && go build -o solitaire . && ./solitaire
 
 ## Tests
 
+The Go tests need a Postgres to create scratch databases on. They **skip**
+rather than fail when `TEST_DATABASE_URL` is unset:
+
 ```bash
-cd backend && go test -race ./...
+docker run -d --name solitaire-test-pg -e POSTGRES_PASSWORD=test -e POSTGRES_USER=test -e POSTGRES_DB=test -p 55432:5432 postgres:16-alpine
+cd backend && TEST_DATABASE_URL='postgres://test:test@localhost:55432/test?sslmode=disable' go test -race ./...
 ```
+
+Each test creates and drops its own database, so they are isolated and safe to
+run in parallel.
 
 ```bash
 cd frontend && npm test
@@ -182,29 +197,83 @@ curl 'localhost:8080/api/leaderboard?limit=5'
 
 ### Database
 
-SQLite via `modernc.org/sqlite`, so there is no cgo requirement. The schema is
-created on startup:
+Postgres via `jackc/pgx`. The schema is created on startup, and `DATABASE_URL`
+is the only required setting:
 
 ```sql
-players(id, name UNIQUE COLLATE NOCASE, created_at)
+players(id, name UNIQUE, created_at)
 scores(id, player_id → players.id, score, moves, duration_seconds, won, difficulty, created_at)
 ```
 
 Leaderboard rows are individual runs, ordered by score descending, then by
 shorter duration, then by earliest submission.
 
+Handles are stored upper-cased by `NormalizeName`, so a plain `UNIQUE`
+constraint gives case-insensitive names without a `citext` column.
+
 `difficulty` is one of `easy` / `medium` / `hard`; anything else is stored as
 `medium` rather than rejected, since the run has already been played. Databases
 created before this column existed are migrated on startup, and their existing
 rows read back as `medium`.
 
+On startup the server waits up to 30s for the database to accept connections,
+so a cold start where the app boots before its database does not become a crash
+loop.
+
 ### Configuration
 
-| Flag | Env | Default |
+**Backend**
+
+| Flag | Env | Default | Notes |
+| --- | --- | --- | --- |
+| `-db` | `DATABASE_URL` | *(required)* | Postgres connection URL |
+| `-addr` | `PORT` / `SOLITAIRE_ADDR` | `:8080` | `PORT` wins; hosts inject it |
+| `-static` | `SOLITAIRE_STATIC` | `static` | Skipped if the directory is absent |
+| | `CORS_ORIGINS` | *(unset — allows any)* | Comma-separated allow-list |
+
+**Frontend**
+
+| Env | Default | Notes |
 | --- | --- | --- |
-| `-addr` | `SOLITAIRE_ADDR` | `:8080` |
-| `-db` | `SOLITAIRE_DB` | `arcade.db` |
-| `-static` | `SOLITAIRE_STATIC` | `static` (skipped if absent) |
+| `VITE_API_URL` | *(unset — relative `/api`)* | Backend origin. **Build-time**, not runtime |
+| `PORT` | `4173` | Port `npm start` serves `dist/` on |
+
+## Deploying to Railway
+
+Three services in one project: **Postgres**, **backend** (root directory
+`backend`), **frontend** (root directory `frontend`).
+
+The one thing that catches people out: **the frontend is a static bundle, so the
+browser calls the backend directly.** Railway's private network
+(`*.railway.internal`) is not reachable from a browser, so the backend needs its
+own generated public domain — not just the frontend.
+
+**1. Postgres.** *New → Database → Add PostgreSQL.* It publishes `DATABASE_URL`
+on the private network; nothing to configure.
+
+**2. Backend.** Generate a domain for it under *Settings → Networking*, then set:
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
+| `CORS_ORIGINS` | `https://<your-frontend-domain>` |
+
+`${{Postgres.DATABASE_URL}}` is a Railway reference variable — it resolves to
+the private-network URL, so database traffic never leaves the project. Do not
+set `PORT`; Railway injects it.
+
+**3. Frontend.** Set:
+
+| Variable | Value |
+| --- | --- |
+| `VITE_API_URL` | `https://<your-backend-domain>` |
+
+No trailing slash and no `/api` suffix — the client appends that itself.
+
+Because Vite inlines `VITE_API_URL` at **build** time, changing it requires a
+redeploy to take effect; restarting the service is not enough.
+
+Deploy the backend first so the database schema exists, then the frontend.
 
 ## Implementation notes
 

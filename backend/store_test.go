@@ -1,24 +1,77 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
-	"path/filepath"
+	"fmt"
+	"net/url"
+	"os"
+	"sync/atomic"
 	"testing"
 )
 
-// newTestStore opens a Store backed by a brand new SQLite file inside the
-// test's own temp dir, so every test (and subtest) gets an isolated database.
+var testDBSeq atomic.Int64
+
+// testBaseURL is the admin connection these tests create scratch databases on.
+// Without it there is nothing to test against, so the suite skips rather than
+// fails — see the README for the one-line Docker command.
+func testBaseURL(t *testing.T) string {
+	t.Helper()
+	base := os.Getenv("TEST_DATABASE_URL")
+	if base == "" {
+		t.Skip("TEST_DATABASE_URL is not set; see README > Tests")
+	}
+	return base
+}
+
+// onDatabase rewrites a connection URL to point at a different database.
+func onDatabase(t *testing.T, raw, name string) string {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
+	}
+	parsed.Path = "/" + name
+	return parsed.String()
+}
+
+// newTestStore gives every test its own freshly created database, so tests are
+// fully isolated and safe to run in parallel.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 
-	path := filepath.Join(t.TempDir(), "arcade_test.db")
-	store, err := OpenStore(path)
+	base := testBaseURL(t)
+	name := fmt.Sprintf("solitaire_test_%d_%d", os.Getpid(), testDBSeq.Add(1))
+
+	admin, err := sql.Open("pgx", base)
 	if err != nil {
-		t.Fatalf("OpenStore(%q) returned error: %v", path, err)
+		t.Fatalf("connect to %s: %v", base, err)
+	}
+	defer admin.Close()
+
+	if _, err := admin.Exec("DROP DATABASE IF EXISTS " + name); err != nil {
+		t.Fatalf("drop stale test database: %v", err)
+	}
+	if _, err := admin.Exec("CREATE DATABASE " + name); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+
+	store, err := OpenStore(onDatabase(t, base, name))
+	if err != nil {
+		t.Fatalf("OpenStore returned error: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := store.Close(); err != nil {
 			t.Errorf("store.Close() returned error: %v", err)
+		}
+		cleaner, err := sql.Open("pgx", base)
+		if err != nil {
+			return
+		}
+		defer cleaner.Close()
+		// Dropping needs the connections above to be gone, which Close ensures.
+		if _, err := cleaner.Exec("DROP DATABASE IF EXISTS " + name); err != nil {
+			t.Logf("could not drop %s: %v", name, err)
 		}
 	})
 	return store
@@ -532,7 +585,7 @@ func TestPlayerAggregateColumns(t *testing.T) {
 			byName[p.Name] = p
 		}
 		for _, tc := range []struct {
-			name                        string
+			name                         string
 			wantBest, wantGames, wantWon int
 		}{
 			{"ACE", 900, 3, 2},

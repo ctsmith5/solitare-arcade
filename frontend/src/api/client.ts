@@ -40,7 +40,21 @@ export class ApiError extends Error {
   }
 }
 
-const BASE = '/api'
+/*
+ * Where the Go API lives.
+ *
+ * Unset (development): stay relative and let the Vite dev-server proxy in
+ * vite.config.ts forward /api to localhost:8080.
+ *
+ * Set (production): call the backend's own origin, because a built SPA is just
+ * static files — there is no proxy in front of it, so a relative /api would hit
+ * the frontend's own domain and 404.
+ *
+ * Vite inlines this at BUILD time, so the variable must be present when
+ * `vite build` runs, not merely at runtime.
+ */
+const API_ORIGIN = (import.meta.env.VITE_API_URL ?? '').trim().replace(/\/+$/, '')
+const BASE = `${API_ORIGIN}/api`
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response

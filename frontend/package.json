@@ -8,11 +8,13 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/game/*.test.ts"
+    "test": "node --experimental-strip-types --test src/game/*.test.ts",
+    "start": "serve -s dist -l tcp://0.0.0.0:${PORT:-4173}"
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "serve": "^14.2.4"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",

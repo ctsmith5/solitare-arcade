@@ -5,7 +5,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"os"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 type API struct {
@@ -197,11 +200,43 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// allowedOrigins is the CORS allow-list, from a comma-separated CORS_ORIGINS.
+// Empty (the default) allows any origin, which is fine here because the API
+// carries no cookies or credentials — but setting it in production keeps other
+// sites from driving your cabinet.
+func allowedOrigins() []string {
+	raw := strings.TrimSpace(os.Getenv("CORS_ORIGINS"))
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, origin := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(origin); trimmed != "" {
+			out = append(out, strings.TrimSuffix(trimmed, "/"))
+		}
+	}
+	return out
+}
+
 func withCORS(next http.Handler) http.Handler {
+	allowed := allowedOrigins()
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := strings.TrimSuffix(r.Header.Get("Origin"), "/")
+
+		switch {
+		case len(allowed) == 0:
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		case origin != "" && slices.Contains(allowed, origin):
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			// The response differs per origin, so caches must key on it.
+			w.Header().Add("Vary", "Origin")
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

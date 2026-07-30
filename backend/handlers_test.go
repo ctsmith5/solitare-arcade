@@ -4,20 +4,16 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"os"
 	"testing"
 )
 
 func newTestAPI(t *testing.T) *API {
 	t.Helper()
-	store, err := OpenStore(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-	return &API{store: store}
+	return &API{store: newTestStore(t)}
 }
 
 // do issues a request against the router and returns the recorder.
@@ -301,35 +297,62 @@ func TestScoreDifficulty(t *testing.T) {
 // A database written before the difficulty column existed must still open, and
 // its existing rows should read back as medium.
 func TestMigratesLegacyDatabase(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "legacy.db")
+	base := testBaseURL(t)
+	name := fmt.Sprintf("solitaire_legacy_%d_%d", os.Getpid(), testDBSeq.Add(1))
 
-	legacy, err := sql.Open("sqlite", path)
+	admin, err := sql.Open("pgx", base)
 	if err != nil {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("connect: %v", err)
 	}
+	defer admin.Close()
+	if _, err := admin.Exec("DROP DATABASE IF EXISTS " + name); err != nil {
+		t.Fatalf("drop stale: %v", err)
+	}
+	if _, err := admin.Exec("CREATE DATABASE " + name); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		cleaner, err := sql.Open("pgx", base)
+		if err != nil {
+			return
+		}
+		defer cleaner.Close()
+		cleaner.Exec("DROP DATABASE IF EXISTS " + name)
+	})
+
+	dsn := onDatabase(t, base, name)
+	legacy, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatalf("open legacy: %v", err)
+	}
+	// The original schema: no difficulty column.
 	_, err = legacy.Exec(`
-CREATE TABLE players (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL COLLATE NOCASE UNIQUE, created_at TEXT NOT NULL DEFAULT (datetime('now')));
+CREATE TABLE players (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE scores (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    id BIGSERIAL PRIMARY KEY,
+    player_id BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     score INTEGER NOT NULL,
     moves INTEGER NOT NULL DEFAULT 0,
     duration_seconds INTEGER NOT NULL DEFAULT 0,
-    won INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    won BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO players (name) VALUES ('OLDTIMER');
-INSERT INTO scores (player_id, score, moves, duration_seconds, won) VALUES (1, 4200, 120, 300, 1);`)
+INSERT INTO scores (player_id, score, moves, duration_seconds, won)
+VALUES (1, 4200, 120, 300, TRUE);`)
 	if err != nil {
 		t.Fatalf("seed legacy schema: %v", err)
 	}
 	legacy.Close()
 
-	store, err := OpenStore(path)
+	store, err := OpenStore(dsn)
 	if err != nil {
 		t.Fatalf("OpenStore on a legacy database: %v", err)
 	}
-	defer store.Close()
 
 	entries, err := store.Leaderboard(5)
 	if err != nil {
@@ -344,10 +367,10 @@ INSERT INTO scores (player_id, score, moves, duration_seconds, won) VALUES (1, 4
 	if entries[0].Score != 4200 {
 		t.Errorf("legacy score = %d, want 4200", entries[0].Score)
 	}
+	store.Close()
 
 	// Opening again must be a no-op rather than a duplicate-column error.
-	store.Close()
-	again, err := OpenStore(path)
+	again, err := OpenStore(dsn)
 	if err != nil {
 		t.Fatalf("second OpenStore: %v", err)
 	}

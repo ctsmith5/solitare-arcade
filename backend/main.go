@@ -15,12 +15,12 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", envOr("SOLITAIRE_ADDR", ":8080"), "listen address")
-	dbPath := flag.String("db", envOr("SOLITAIRE_DB", "arcade.db"), "path to the SQLite database file")
+	addr := flag.String("addr", defaultAddr(), "listen address")
+	dsn := flag.String("db", envOr("DATABASE_URL", ""), "Postgres connection URL")
 	staticDir := flag.String("static", envOr("SOLITAIRE_STATIC", "static"), "directory of built frontend assets (optional)")
 	flag.Parse()
 
-	store, err := OpenStore(*dbPath)
+	store, err := OpenStore(*dsn)
 	if err != nil {
 		log.Fatalf("database: %v", err)
 	}
@@ -44,7 +44,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("🕹  solitaire arcade backend listening on %s (db: %s)", *addr, *dbPath)
+		log.Printf("🕹  solitaire arcade backend listening on %s", *addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("listen: %v", err)
 		}
@@ -85,4 +85,16 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// defaultAddr honours the PORT variable that most hosts (Railway, Render,
+// Heroku, Fly) inject, falling back to the local development port.
+//
+// Binding to ":port" rather than "0.0.0.0:port" listens dual-stack, which
+// Railway's IPv6-only private network requires.
+func defaultAddr() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return ":" + strings.TrimPrefix(port, ":")
+	}
+	return envOr("SOLITAIRE_ADDR", ":8080")
 }
