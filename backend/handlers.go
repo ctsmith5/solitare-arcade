@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -33,8 +34,34 @@ func (a *API) Routes() http.Handler {
 
 // ---- handlers -----------------------------------------------------------
 
+// health reports what this build actually supports, not just that it is alive.
+//
+// With the frontend and API deploying separately it is otherwise impossible to
+// tell a stale backend from a current one without probing behaviour — and the
+// obvious probe (submitting a score for a game it may not know) can overwrite a
+// real personal best, since an unrecognised game falls back to solitaire.
 func (a *API) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	games := make([]string, 0, len(validGames))
+	for game := range validGames {
+		games = append(games, game)
+	}
+	sort.Strings(games)
+
+	payload := map[string]any{
+		"status": "ok",
+		"games":  games,
+	}
+	// Railway (and most hosts) expose the deployed commit; surface it when set.
+	for _, key := range []string{"RAILWAY_GIT_COMMIT_SHA", "GIT_COMMIT", "SOURCE_COMMIT"} {
+		if sha := strings.TrimSpace(os.Getenv(key)); sha != "" {
+			if len(sha) > 7 {
+				sha = sha[:7]
+			}
+			payload["commit"] = sha
+			break
+		}
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (a *API) listPlayers(w http.ResponseWriter, r *http.Request) {

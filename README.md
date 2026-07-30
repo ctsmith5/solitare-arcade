@@ -279,7 +279,7 @@ to uppercase and limited to 1–12 characters of `A–Z 0–9`, space, `-` and `
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | Liveness check |
+| `GET` | `/api/health` | Liveness, plus the games this build supports and its commit — `{"status":"ok","games":["solitaire","sudoku","wordle"],"commit":"4bf972e"}` |
 | `GET` | `/api/players` | All players with best score and games played |
 | `POST` | `/api/players` | Create a player — `{"name": "ZED"}`. Returns `201`; an existing handle returns `200` with that player, so creating and selecting are the same gesture |
 | `GET` | `/api/players/{id}` | One player with aggregates |

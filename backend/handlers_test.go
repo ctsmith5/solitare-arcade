@@ -531,6 +531,44 @@ func TestUnknownFieldsAreIgnored(t *testing.T) {
 	assertStatus(t, rec2, http.StatusBadRequest)
 }
 
+// Health advertises the games this build knows, so a stale deploy is visible
+// without a score submission that could overwrite a personal best.
+func TestHealthReportsSupportedGames(t *testing.T) {
+	api := newTestAPI(t)
+
+	rec := do(t, api, http.MethodGet, "/api/health", nil)
+	assertStatus(t, rec, http.StatusOK)
+
+	var body struct {
+		Status string   `json:"status"`
+		Games  []string `json:"games"`
+		Commit string   `json:"commit"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %s: %v", rec.Body.String(), err)
+	}
+	if body.Status != "ok" {
+		t.Errorf("status = %q, want ok", body.Status)
+	}
+
+	want := []string{"solitaire", "sudoku", "wordle"}
+	if len(body.Games) != len(want) {
+		t.Fatalf("games = %v, want %v", body.Games, want)
+	}
+	for i, game := range want {
+		if body.Games[i] != game {
+			t.Errorf("games[%d] = %q, want %q (sorted)", i, body.Games[i], game)
+		}
+	}
+
+	// Every advertised game must actually be accepted, or the report lies.
+	for _, game := range body.Games {
+		if NormalizeGame(game) != game {
+			t.Errorf("health advertises %q but NormalizeGame rewrites it to %q", game, NormalizeGame(game))
+		}
+	}
+}
+
 /* ---- middleware ------------------------------------------------------- */
 
 func TestCORSPreflight(t *testing.T) {
@@ -549,7 +587,7 @@ func TestHealth(t *testing.T) {
 	api := newTestAPI(t)
 	rec := do(t, api, http.MethodGet, "/api/health", nil)
 	assertStatus(t, rec, http.StatusOK)
-	if body := decodeBody[map[string]string](t, rec); body["status"] != "ok" {
-		t.Errorf("status = %q, want ok", body["status"])
+	if body := decodeBody[map[string]any](t, rec); body["status"] != "ok" {
+		t.Errorf("status = %v, want ok", body["status"])
 	}
 }
