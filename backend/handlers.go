@@ -195,9 +195,18 @@ func queryInt(r *http.Request, key string, def int) int {
 	return n
 }
 
+// decodeJSON reads a request body, ignoring fields it does not recognise.
+//
+// Deliberately tolerant: the frontend and API deploy independently, so the
+// frontend is routinely a version ahead. Rejecting unknown fields turns any
+// additive change into a total outage — a client sending a new field gets a 400
+// for every request until the API catches up. Ignoring it degrades to "that
+// field is not stored yet" instead, which is recoverable.
+//
+// The trade-off is that a misspelled field is silently dropped rather than
+// reported, so every field that matters is validated explicitly by the handler.
 func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<16))
-	dec.DisallowUnknownFields()
 	return dec.Decode(dst)
 }
 

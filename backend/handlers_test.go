@@ -494,6 +494,43 @@ INSERT INTO scores (player_id, score, moves, duration_seconds, won) VALUES
 	again.Close()
 }
 
+// A client that is a version ahead must not be rejected outright: unknown
+// fields are ignored so an additive frontend change cannot take the API down.
+func TestUnknownFieldsAreIgnored(t *testing.T) {
+	api := newTestAPI(t)
+	player := decodeBody[Player](t, do(t, api, http.MethodPost, "/api/players", map[string]string{"name": "FUTURE"}))
+
+	rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
+		"player_id": player.ID,
+		"game":      "sudoku",
+		"score":     1234,
+		"won":       true,
+		// Fields a future frontend might add before the API knows them.
+		"combo_multiplier": 3,
+		"achievements":     []string{"speedrun"},
+		"telemetry":        map[string]any{"fps": 60},
+	})
+	assertStatus(t, rec, http.StatusCreated)
+
+	got := decodeBody[submitResult](t, rec)
+	if got.Best.Score != 1234 || got.Best.Game != "sudoku" {
+		t.Errorf("known fields should still be honoured, got %+v", got.Best)
+	}
+
+	// A player creation with extra fields must work too.
+	rec = do(t, api, http.MethodPost, "/api/players", map[string]any{"name": "EXTRA", "avatar": "cat"})
+	assertStatus(t, rec, http.StatusCreated)
+	if decodeBody[Player](t, rec).Name != "EXTRA" {
+		t.Error("player name should still be read")
+	}
+
+	// Genuinely malformed JSON is still rejected.
+	req := httptest.NewRequest(http.MethodPost, "/api/scores", bytes.NewReader([]byte("{not json")))
+	rec2 := httptest.NewRecorder()
+	api.Routes().ServeHTTP(rec2, req)
+	assertStatus(t, rec2, http.StatusBadRequest)
+}
+
 /* ---- middleware ------------------------------------------------------- */
 
 func TestCORSPreflight(t *testing.T) {
