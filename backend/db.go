@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -24,9 +25,13 @@ CREATE TABLE IF NOT EXISTS players (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- One row per player per game: a personal best, not a history. Lower scores
+-- are never stored, so the table stays the source of truth for the combined
+-- arcade total.
 CREATE TABLE IF NOT EXISTS scores (
     id               BIGSERIAL PRIMARY KEY,
     player_id        BIGINT NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    game             TEXT    NOT NULL DEFAULT 'solitaire',
     score            INTEGER NOT NULL,
     moves            INTEGER NOT NULL DEFAULT 0,
     duration_seconds INTEGER NOT NULL DEFAULT 0,
@@ -43,6 +48,18 @@ CREATE INDEX IF NOT EXISTS idx_scores_player ON scores(player_id);
 // so replaying these on an up-to-date database is a no-op.
 var migrations = []string{
 	`ALTER TABLE scores ADD COLUMN IF NOT EXISTS difficulty TEXT NOT NULL DEFAULT 'medium'`,
+	`ALTER TABLE scores ADD COLUMN IF NOT EXISTS game TEXT NOT NULL DEFAULT 'solitaire'`,
+
+	// Scores used to be a full history. Collapse each player's runs down to
+	// their best per game, keeping the earliest row on a tie, so the unique
+	// index below can be created and the table means "personal best".
+	`DELETE FROM scores s
+	 USING scores other
+	 WHERE s.player_id = other.player_id
+	   AND s.game = other.game
+	   AND (other.score > s.score OR (other.score = s.score AND other.id < s.id))`,
+
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_scores_player_game ON scores(player_id, game)`,
 }
 
 // OpenStore connects to Postgres and brings the schema up to date.
@@ -115,15 +132,20 @@ type Player struct {
 	ID        int64  `json:"id"`
 	Name      string `json:"name"`
 	CreatedAt string `json:"created_at"`
-	BestScore int    `json:"best_score"`
-	GamesWon  int    `json:"games_won"`
-	Games     int    `json:"games_played"`
+	// TotalScore is the arcade total: the player's best in each game, summed.
+	TotalScore int `json:"total_score"`
+	// BestScore is the single highest game best, kept for per-game display.
+	BestScore int            `json:"best_score"`
+	GamesWon  int            `json:"games_won"`
+	Games     int            `json:"games_played"`
+	Bests     map[string]int `json:"bests"`
 }
 
 type Score struct {
 	ID         int64  `json:"id"`
 	PlayerID   int64  `json:"player_id"`
 	PlayerName string `json:"player_name"`
+	Game       string `json:"game"`
 	Score      int    `json:"score"`
 	Moves      int    `json:"moves"`
 	Duration   int    `json:"duration_seconds"`
@@ -132,17 +154,16 @@ type Score struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-// LeaderboardEntry is one row of the arcade high-score table.
+// LeaderboardEntry is one row of the arcade high-score table. Rows are players,
+// not runs: the cabinet ranks on the combined total across every game.
 type LeaderboardEntry struct {
-	Rank       int    `json:"rank"`
-	PlayerID   int64  `json:"player_id"`
-	PlayerName string `json:"player_name"`
-	Score      int    `json:"score"`
-	Moves      int    `json:"moves"`
-	Duration   int    `json:"duration_seconds"`
-	Won        bool   `json:"won"`
-	Difficulty string `json:"difficulty"`
-	CreatedAt  string `json:"created_at"`
+	Rank       int            `json:"rank"`
+	PlayerID   int64          `json:"player_id"`
+	PlayerName string         `json:"player_name"`
+	TotalScore int            `json:"total_score"`
+	Games      int            `json:"games_played"`
+	GamesWon   int            `json:"games_won"`
+	Bests      map[string]int `json:"bests"`
 }
 
 var (
@@ -183,17 +204,36 @@ func NormalizeDifficulty(raw string) string {
 	return "medium"
 }
 
+// Games the cabinet knows about. Unknown values fall back to solitaire rather
+// than being rejected, for the same reason as difficulty: the run is over.
+var validGames = map[string]bool{"solitaire": true, "sudoku": true}
+
+func NormalizeGame(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if validGames[value] {
+		return value
+	}
+	return "solitaire"
+}
+
 const timestampLayout = time.RFC3339
 
 // ---- players ------------------------------------------------------------
 
+// Each score row is already a personal best, so summing them gives the arcade
+// total directly — no per-game MAX subquery needed.
 const playerSelect = `
 SELECT p.id,
        p.name,
        p.created_at,
-       COALESCE(MAX(s.score), 0)        AS best_score,
-       COUNT(*) FILTER (WHERE s.won)    AS games_won,
-       COUNT(s.id)                      AS games_played
+       COALESCE(SUM(s.score), 0)     AS total_score,
+       COALESCE(MAX(s.score), 0)     AS best_score,
+       COUNT(*) FILTER (WHERE s.won) AS games_won,
+       COUNT(s.id)                   AS games_played,
+       COALESCE(
+         json_object_agg(s.game, s.score) FILTER (WHERE s.game IS NOT NULL),
+         '{}'
+       ) AS bests
 FROM players p
 LEFT JOIN scores s ON s.player_id = p.id
 `
@@ -205,11 +245,19 @@ func scanPlayers(rows *sql.Rows) ([]Player, error) {
 		var (
 			p       Player
 			created time.Time
+			bests   []byte
 		)
-		if err := rows.Scan(&p.ID, &p.Name, &created, &p.BestScore, &p.GamesWon, &p.Games); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &created, &p.TotalScore, &p.BestScore,
+			&p.GamesWon, &p.Games, &bests); err != nil {
 			return nil, err
 		}
 		p.CreatedAt = created.UTC().Format(timestampLayout)
+		p.Bests = map[string]int{}
+		if len(bests) > 0 {
+			if err := json.Unmarshal(bests, &p.Bests); err != nil {
+				return nil, fmt.Errorf("decode bests: %w", err)
+			}
+		}
 		players = append(players, p)
 	}
 	return players, rows.Err()
@@ -218,7 +266,7 @@ func scanPlayers(rows *sql.Rows) ([]Player, error) {
 func (s *Store) ListPlayers() ([]Player, error) {
 	rows, err := s.db.Query(playerSelect + `
 GROUP BY p.id
-ORDER BY best_score DESC, p.name ASC`)
+ORDER BY total_score DESC, p.name ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -288,45 +336,99 @@ func (s *Store) CreatePlayer(raw string) (*Player, error) {
 
 // ---- scores -------------------------------------------------------------
 
-func (s *Store) AddScore(playerID int64, score, moves, duration int, won bool, difficulty string) (*Score, error) {
+// SubmitScore records a run only if it beats the player's existing best for
+// that game. Returns the stored best and whether this run replaced it.
+//
+// Lower runs are deliberately not persisted: the scores table holds one row per
+// player per game, so it is the arcade total by construction rather than
+// something that has to be recomputed from a history.
+func (s *Store) SubmitScore(playerID int64, game string, score, moves, duration int, won bool, difficulty string) (*Score, bool, error) {
 	if _, err := s.GetPlayer(playerID); err != nil {
+		return nil, false, err
+	}
+	game = NormalizeGame(game)
+
+	const returning = `RETURNING id, player_id, game, score, moves, duration_seconds, won, difficulty, created_at`
+
+	row := s.db.QueryRow(`
+INSERT INTO scores (player_id, game, score, moves, duration_seconds, won, difficulty)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (player_id, game) DO UPDATE
+SET score            = EXCLUDED.score,
+    moves            = EXCLUDED.moves,
+    duration_seconds = EXCLUDED.duration_seconds,
+    won              = EXCLUDED.won,
+    difficulty       = EXCLUDED.difficulty,
+    created_at       = now()
+WHERE EXCLUDED.score > scores.score
+`+returning,
+		playerID, game, score, moves, duration, won, NormalizeDifficulty(difficulty))
+
+	stored, err := scanScore(row)
+	switch {
+	case err == nil:
+		return stored, true, s.attachName(stored)
+	case errors.Is(err, sql.ErrNoRows):
+		// The WHERE guard rejected it, so the existing best stands. Hand it
+		// back so the caller can show what the player has to beat.
+		existing, err := s.BestScore(playerID, game)
+		if err != nil {
+			return nil, false, err
+		}
+		return existing, false, nil
+	default:
+		return nil, false, err
+	}
+}
+
+// BestScore returns a player's stored best for one game.
+func (s *Store) BestScore(playerID int64, game string) (*Score, error) {
+	row := s.db.QueryRow(`
+SELECT id, player_id, game, score, moves, duration_seconds, won, difficulty, created_at
+FROM scores WHERE player_id = $1 AND game = $2`, playerID, NormalizeGame(game))
+
+	stored, err := scanScore(row)
+	if err != nil {
 		return nil, err
 	}
+	return stored, s.attachName(stored)
+}
 
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanScore(row rowScanner) (*Score, error) {
 	var (
 		out     Score
 		created time.Time
 	)
-	err := s.db.QueryRow(`
-INSERT INTO scores (player_id, score, moves, duration_seconds, won, difficulty)
-VALUES ($1, $2, $3, $4, $5, $6)
-RETURNING id, player_id, score, moves, duration_seconds, won, difficulty, created_at`,
-		playerID, score, moves, duration, won, NormalizeDifficulty(difficulty),
-	).Scan(&out.ID, &out.PlayerID, &out.Score, &out.Moves, &out.Duration,
-		&out.Won, &out.Difficulty, &created)
-	if err != nil {
+	if err := row.Scan(&out.ID, &out.PlayerID, &out.Game, &out.Score, &out.Moves,
+		&out.Duration, &out.Won, &out.Difficulty, &created); err != nil {
 		return nil, err
 	}
 	out.CreatedAt = created.UTC().Format(timestampLayout)
-
-	if err := s.db.QueryRow(`SELECT name FROM players WHERE id = $1`, playerID).
-		Scan(&out.PlayerName); err != nil {
-		return nil, err
-	}
 	return &out, nil
 }
 
-// Leaderboard returns the top N runs, arcade-cabinet style: one row per run,
-// highest score first, earliest submission winning any tie.
+func (s *Store) attachName(sc *Score) error {
+	return s.db.QueryRow(`SELECT name FROM players WHERE id = $1`, sc.PlayerID).Scan(&sc.PlayerName)
+}
+
+// Leaderboard ranks players by their combined total across every game.
 func (s *Store) Leaderboard(limit int) ([]LeaderboardEntry, error) {
 	if limit <= 0 {
 		limit = 5
 	}
 	rows, err := s.db.Query(`
-SELECT s.player_id, p.name, s.score, s.moves, s.duration_seconds, s.won, s.difficulty, s.created_at
-FROM scores s
-JOIN players p ON p.id = s.player_id
-ORDER BY s.score DESC, s.duration_seconds ASC, s.created_at ASC
+SELECT p.id,
+       p.name,
+       SUM(s.score)                  AS total_score,
+       COUNT(s.id)                   AS games_played,
+       COUNT(*) FILTER (WHERE s.won) AS games_won,
+       json_object_agg(s.game, s.score) AS bests
+FROM players p
+JOIN scores s ON s.player_id = p.id
+GROUP BY p.id
+ORDER BY total_score DESC, p.name ASC
 LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -338,26 +440,32 @@ LIMIT $1`, limit)
 	for rows.Next() {
 		rank++
 		e := LeaderboardEntry{Rank: rank}
-		var created time.Time
-		if err := rows.Scan(&e.PlayerID, &e.PlayerName, &e.Score, &e.Moves,
-			&e.Duration, &e.Won, &e.Difficulty, &created); err != nil {
+		var bests []byte
+		if err := rows.Scan(&e.PlayerID, &e.PlayerName, &e.TotalScore,
+			&e.Games, &e.GamesWon, &bests); err != nil {
 			return nil, err
 		}
-		e.CreatedAt = created.UTC().Format(timestampLayout)
+		e.Bests = map[string]int{}
+		if len(bests) > 0 {
+			if err := json.Unmarshal(bests, &e.Bests); err != nil {
+				return nil, fmt.Errorf("decode bests: %w", err)
+			}
+		}
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
 }
 
+// PlayerScores lists a player's best in each game, highest first.
 func (s *Store) PlayerScores(playerID int64, limit int) ([]Score, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	rows, err := s.db.Query(`
-SELECT s.id, s.player_id, p.name, s.score, s.moves, s.duration_seconds, s.won, s.difficulty, s.created_at
+SELECT s.id, s.player_id, p.name, s.game, s.score, s.moves, s.duration_seconds, s.won, s.difficulty, s.created_at
 FROM scores s JOIN players p ON p.id = s.player_id
 WHERE s.player_id = $1
-ORDER BY s.score DESC, s.created_at DESC
+ORDER BY s.score DESC
 LIMIT $2`, playerID, limit)
 	if err != nil {
 		return nil, err
@@ -368,7 +476,7 @@ LIMIT $2`, playerID, limit)
 	for rows.Next() {
 		var sc Score
 		var created time.Time
-		if err := rows.Scan(&sc.ID, &sc.PlayerID, &sc.PlayerName, &sc.Score,
+		if err := rows.Scan(&sc.ID, &sc.PlayerID, &sc.PlayerName, &sc.Game, &sc.Score,
 			&sc.Moves, &sc.Duration, &sc.Won, &sc.Difficulty, &created); err != nil {
 			return nil, err
 		}

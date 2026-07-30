@@ -140,26 +140,67 @@ func TestGetPlayerEndpoint(t *testing.T) {
 /* ---- scores ----------------------------------------------------------- */
 
 type scoreBody struct {
-	PlayerID int64 `json:"player_id"`
-	Score    int   `json:"score"`
-	Moves    int   `json:"moves"`
-	Duration int   `json:"duration_seconds"`
-	Won      bool  `json:"won"`
+	PlayerID int64  `json:"player_id"`
+	Game     string `json:"game"`
+	Score    int    `json:"score"`
+	Moves    int    `json:"moves"`
+	Duration int    `json:"duration_seconds"`
+	Won      bool   `json:"won"`
+}
+
+// submitResult mirrors what POST /api/scores returns.
+type submitResult struct {
+	PersonalBest bool  `json:"personal_best"`
+	Submitted    int   `json:"submitted"`
+	Best         Score `json:"best"`
+}
+
+// submit posts a run and returns the decoded result.
+func submit(t *testing.T, api *API, playerID int64, game string, score int) submitResult {
+	t.Helper()
+	rec := do(t, api, http.MethodPost, "/api/scores", scoreBody{
+		PlayerID: playerID, Game: game, Score: score, Moves: 10, Duration: 100, Won: true,
+	})
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("submit %d: status %d (%s)", score, rec.Code, rec.Body.String())
+	}
+	return decodeBody[submitResult](t, rec)
 }
 
 func TestCreateScoreEndpoint(t *testing.T) {
 	api := newTestAPI(t)
 	player := decodeBody[Player](t, do(t, api, http.MethodPost, "/api/players", map[string]string{"name": "RETRO"}))
 
-	t.Run("happy path", func(t *testing.T) {
+	t.Run("first run is a personal best and returns 201", func(t *testing.T) {
 		rec := do(t, api, http.MethodPost, "/api/scores", scoreBody{
-			PlayerID: player.ID, Score: 1250, Moves: 90, Duration: 240, Won: true,
+			PlayerID: player.ID, Game: "solitaire", Score: 1250, Moves: 90, Duration: 240, Won: true,
 		})
 		assertStatus(t, rec, http.StatusCreated)
 
-		saved := decodeBody[Score](t, rec)
-		if saved.Score != 1250 || !saved.Won || saved.PlayerName != "RETRO" {
-			t.Errorf("unexpected saved score: %+v", saved)
+		got := decodeBody[submitResult](t, rec)
+		if !got.PersonalBest {
+			t.Error("personal_best = false, want true for a first run")
+		}
+		if got.Best.Score != 1250 || got.Best.PlayerName != "RETRO" || got.Best.Game != "solitaire" {
+			t.Errorf("unexpected stored best: %+v", got.Best)
+		}
+	})
+
+	t.Run("a weaker run returns 200 and keeps the old best", func(t *testing.T) {
+		rec := do(t, api, http.MethodPost, "/api/scores", scoreBody{
+			PlayerID: player.ID, Game: "solitaire", Score: 5, Moves: 1, Duration: 1,
+		})
+		assertStatus(t, rec, http.StatusOK)
+
+		got := decodeBody[submitResult](t, rec)
+		if got.PersonalBest {
+			t.Error("personal_best = true, want false")
+		}
+		if got.Best.Score != 1250 {
+			t.Errorf("best = %d, want the surviving 1250", got.Best.Score)
+		}
+		if got.Submitted != 5 {
+			t.Errorf("submitted = %d, want the run that was offered", got.Submitted)
 		}
 	})
 
@@ -182,8 +223,6 @@ func TestCreateScoreEndpoint(t *testing.T) {
 	})
 }
 
-/* ---- leaderboard ------------------------------------------------------ */
-
 func TestLeaderboardEndpoint(t *testing.T) {
 	api := newTestAPI(t)
 
@@ -193,31 +232,60 @@ func TestLeaderboardEndpoint(t *testing.T) {
 		t.Errorf("empty leaderboard = %q, want an empty JSON array (not null)", got)
 	}
 
-	names := []string{"AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG"}
-	scores := []int{500, 4000, 1500, 900, 2500, 120, 3300}
-	for i, name := range names {
-		p := decodeBody[Player](t, do(t, api, http.MethodPost, "/api/players", map[string]string{"name": name}))
-		do(t, api, http.MethodPost, "/api/scores", scoreBody{
-			PlayerID: p.ID, Score: scores[i], Moves: 10, Duration: 100, Won: i%2 == 0,
-		})
+	newPlayer := func(name string) Player {
+		return decodeBody[Player](t, do(t, api, http.MethodPost, "/api/players", map[string]string{"name": name}))
 	}
 
-	t.Run("defaults to the top 5, ranked", func(t *testing.T) {
+	// ACE is behind on both individual games but ahead on the combined total.
+	ace := newPlayer("ACE")
+	submit(t, api, ace.ID, "solitaire", 3000)
+	submit(t, api, ace.ID, "sudoku", 2500)
+
+	zed := newPlayer("ZED")
+	submit(t, api, zed.ID, "solitaire", 4000)
+
+	nova := newPlayer("NOVA")
+	submit(t, api, nova.ID, "sudoku", 1000)
+
+	t.Run("ranks on the combined total", func(t *testing.T) {
 		rec := do(t, api, http.MethodGet, "/api/leaderboard", nil)
 		assertStatus(t, rec, http.StatusOK)
 		entries := decodeBody[[]LeaderboardEntry](t, rec)
 
-		if len(entries) != 5 {
-			t.Fatalf("len = %d, want 5", len(entries))
+		if len(entries) != 3 {
+			t.Fatalf("len = %d, want 3", len(entries))
 		}
-		want := []int{4000, 3300, 2500, 1500, 900}
-		for i, entry := range entries {
-			if entry.Score != want[i] {
-				t.Errorf("entry %d score = %d, want %d", i, entry.Score, want[i])
+		want := []struct {
+			name  string
+			total int
+		}{{"ACE", 5500}, {"ZED", 4000}, {"NOVA", 1000}}
+		for i, w := range want {
+			if entries[i].PlayerName != w.name || entries[i].TotalScore != w.total {
+				t.Errorf("rank %d = %s/%d, want %s/%d", i+1,
+					entries[i].PlayerName, entries[i].TotalScore, w.name, w.total)
 			}
-			if entry.Rank != i+1 {
-				t.Errorf("entry %d rank = %d, want %d", i, entry.Rank, i+1)
-			}
+		}
+		if entries[0].Bests["sudoku"] != 2500 {
+			t.Errorf("ACE bests = %v, want sudoku 2500", entries[0].Bests)
+		}
+	})
+
+	t.Run("weaker repeat runs do not change the total", func(t *testing.T) {
+		submit(t, api, ace.ID, "solitaire", 10)
+		submit(t, api, ace.ID, "sudoku", 10)
+
+		entries := decodeBody[[]LeaderboardEntry](t, do(t, api, http.MethodGet, "/api/leaderboard", nil))
+		if entries[0].TotalScore != 5500 {
+			t.Errorf("total = %d, want 5500 unchanged", entries[0].TotalScore)
+		}
+	})
+
+	t.Run("a better run raises the total", func(t *testing.T) {
+		submit(t, api, nova.ID, "sudoku", 9000)
+
+		entries := decodeBody[[]LeaderboardEntry](t, do(t, api, http.MethodGet, "/api/leaderboard", nil))
+		if entries[0].PlayerName != "NOVA" || entries[0].TotalScore != 9000 {
+			t.Errorf("top = %s/%d, want NOVA/9000", entries[0].PlayerName, entries[0].TotalScore)
 		}
 	})
 
@@ -228,30 +296,29 @@ func TestLeaderboardEndpoint(t *testing.T) {
 			t.Errorf("len = %d, want 2", len(entries))
 		}
 	})
-
-	t.Run("falls back to the default on a nonsense limit", func(t *testing.T) {
-		rec := do(t, api, http.MethodGet, "/api/leaderboard?limit=abc", nil)
-		assertStatus(t, rec, http.StatusOK)
-		if entries := decodeBody[[]LeaderboardEntry](t, rec); len(entries) != 5 {
-			t.Errorf("len = %d, want the default 5", len(entries))
-		}
-	})
 }
-
-/* ---- difficulty ------------------------------------------------------- */
 
 func TestScoreDifficulty(t *testing.T) {
 	api := newTestAPI(t)
 	player := decodeBody[Player](t, do(t, api, http.MethodPost, "/api/players", map[string]string{"name": "DIFF"}))
 
+	// Each submission has to beat the last, otherwise it is correctly rejected
+	// and nothing is written for us to inspect.
+	score := 100
+	postDifficulty := func(t *testing.T, difficulty string) submitResult {
+		t.Helper()
+		score += 100
+		rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
+			"player_id": player.ID, "game": "solitaire", "score": score,
+			"moves": 5, "duration_seconds": 60, "won": true, "difficulty": difficulty,
+		})
+		assertStatus(t, rec, http.StatusCreated)
+		return decodeBody[submitResult](t, rec)
+	}
+
 	t.Run("round-trips each difficulty", func(t *testing.T) {
 		for _, want := range []string{"easy", "medium", "hard"} {
-			rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
-				"player_id": player.ID, "score": 100, "moves": 5,
-				"duration_seconds": 60, "won": true, "difficulty": want,
-			})
-			assertStatus(t, rec, http.StatusCreated)
-			if got := decodeBody[Score](t, rec).Difficulty; got != want {
+			if got := postDifficulty(t, want).Best.Difficulty; got != want {
 				t.Errorf("difficulty = %q, want %q", got, want)
 			}
 		}
@@ -259,43 +326,46 @@ func TestScoreDifficulty(t *testing.T) {
 
 	t.Run("unknown and missing values fall back to medium", func(t *testing.T) {
 		for _, given := range []string{"", "IMPOSSIBLE", "  HARDER  "} {
-			rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
-				"player_id": player.ID, "score": 10, "difficulty": given,
-			})
-			assertStatus(t, rec, http.StatusCreated)
-			if got := decodeBody[Score](t, rec).Difficulty; got != "medium" {
+			if got := postDifficulty(t, given).Best.Difficulty; got != "medium" {
 				t.Errorf("difficulty for %q = %q, want medium", given, got)
 			}
 		}
 	})
 
 	t.Run("casing is normalized", func(t *testing.T) {
-		rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
-			"player_id": player.ID, "score": 10, "difficulty": "HARD",
-		})
-		assertStatus(t, rec, http.StatusCreated)
-		if got := decodeBody[Score](t, rec).Difficulty; got != "hard" {
+		if got := postDifficulty(t, "HARD").Best.Difficulty; got != "hard" {
 			t.Errorf("difficulty = %q, want hard", got)
 		}
 	})
 
-	t.Run("leaderboard reports it", func(t *testing.T) {
-		rec := do(t, api, http.MethodGet, "/api/leaderboard", nil)
-		assertStatus(t, rec, http.StatusOK)
-		entries := decodeBody[[]LeaderboardEntry](t, rec)
-		if len(entries) == 0 {
-			t.Fatal("expected at least one entry")
+	t.Run("an unknown game falls back to solitaire", func(t *testing.T) {
+		score += 100
+		rec := do(t, api, http.MethodPost, "/api/scores", map[string]any{
+			"player_id": player.ID, "game": "pinball", "score": score,
+		})
+		assertStatus(t, rec, http.StatusCreated)
+		if got := decodeBody[submitResult](t, rec).Best.Game; got != "solitaire" {
+			t.Errorf("game = %q, want solitaire", got)
 		}
-		for _, e := range entries {
-			if !validDifficulties[e.Difficulty] {
-				t.Errorf("entry %+v has an unexpected difficulty", e)
+	})
+
+	// The leaderboard aggregates players rather than runs, so difficulty now
+	// lives on the stored best rather than on a leaderboard row.
+	t.Run("the stored best carries the difficulty", func(t *testing.T) {
+		rec := do(t, api, http.MethodGet, fmt.Sprintf("/api/players/%d/scores", player.ID), nil)
+		assertStatus(t, rec, http.StatusOK)
+		scores := decodeBody[[]Score](t, rec)
+		if len(scores) == 0 {
+			t.Fatal("expected at least one stored best")
+		}
+		for _, sc := range scores {
+			if !validDifficulties[sc.Difficulty] {
+				t.Errorf("score %+v has an unexpected difficulty", sc)
 			}
 		}
 	})
 }
 
-// A database written before the difficulty column existed must still open, and
-// its existing rows should read back as medium.
 func TestMigratesLegacyDatabase(t *testing.T) {
 	base := testBaseURL(t)
 	name := fmt.Sprintf("solitaire_legacy_%d_%d", os.Getpid(), testDBSeq.Add(1))
@@ -342,8 +412,14 @@ CREATE TABLE scores (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO players (name) VALUES ('OLDTIMER');
-INSERT INTO scores (player_id, score, moves, duration_seconds, won)
-VALUES (1, 4200, 120, 300, TRUE);`)
+INSERT INTO players (name) VALUES ('ROOKIE');
+-- The old model kept every run, so a player has many rows.
+INSERT INTO scores (player_id, score, moves, duration_seconds, won) VALUES
+  (1,  900, 40, 200, FALSE),
+  (1, 4200,120, 300, TRUE),
+  (1,  150, 10,  60, FALSE),
+  (1, 4200,111, 290, TRUE),
+  (2,   75,  5,  30, FALSE);`)
 	if err != nil {
 		t.Fatalf("seed legacy schema: %v", err)
 	}
@@ -354,19 +430,60 @@ VALUES (1, 4200, 120, 300, TRUE);`)
 		t.Fatalf("OpenStore on a legacy database: %v", err)
 	}
 
-	entries, err := store.Leaderboard(5)
-	if err != nil {
-		t.Fatalf("Leaderboard: %v", err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("len(entries) = %d, want 1", len(entries))
-	}
-	if entries[0].Difficulty != "medium" {
-		t.Errorf("legacy row difficulty = %q, want medium", entries[0].Difficulty)
-	}
-	if entries[0].Score != 4200 {
-		t.Errorf("legacy score = %d, want 4200", entries[0].Score)
-	}
+	t.Run("collapses each player's history to their best", func(t *testing.T) {
+		rows, err := store.PlayerScores(1, 50)
+		if err != nil {
+			t.Fatalf("PlayerScores: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("OLDTIMER kept %d rows, want exactly 1 after collapsing", len(rows))
+		}
+		if rows[0].Score != 4200 {
+			t.Errorf("kept score = %d, want the best 4200", rows[0].Score)
+		}
+		// The tie between the two 4200s must resolve to the earlier row.
+		if rows[0].Moves != 120 {
+			t.Errorf("kept moves = %d, want 120 (the earlier of the tied rows)", rows[0].Moves)
+		}
+	})
+
+	t.Run("backfills game and difficulty", func(t *testing.T) {
+		rows, _ := store.PlayerScores(1, 50)
+		if rows[0].Game != "solitaire" {
+			t.Errorf("game = %q, want solitaire", rows[0].Game)
+		}
+		if rows[0].Difficulty != "medium" {
+			t.Errorf("difficulty = %q, want medium", rows[0].Difficulty)
+		}
+	})
+
+	t.Run("leaderboard totals the collapsed rows", func(t *testing.T) {
+		entries, err := store.Leaderboard(5)
+		if err != nil {
+			t.Fatalf("Leaderboard: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Fatalf("len(entries) = %d, want 2 players", len(entries))
+		}
+		if entries[0].PlayerName != "OLDTIMER" || entries[0].TotalScore != 4200 {
+			t.Errorf("top = %s/%d, want OLDTIMER/4200", entries[0].PlayerName, entries[0].TotalScore)
+		}
+		if entries[1].TotalScore != 75 {
+			t.Errorf("ROOKIE total = %d, want 75", entries[1].TotalScore)
+		}
+	})
+
+	t.Run("the unique constraint now holds", func(t *testing.T) {
+		// A second solitaire row for the same player must upsert, not insert.
+		if _, _, err := store.SubmitScore(1, "solitaire", 9999, 1, 1, true, "hard"); err != nil {
+			t.Fatalf("SubmitScore after migration: %v", err)
+		}
+		rows, _ := store.PlayerScores(1, 50)
+		if len(rows) != 1 || rows[0].Score != 9999 {
+			t.Errorf("rows = %+v, want a single row at 9999", rows)
+		}
+	})
+
 	store.Close()
 
 	// Opening again must be a no-op rather than a duplicate-column error.

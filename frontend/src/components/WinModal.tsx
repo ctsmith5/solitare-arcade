@@ -13,6 +13,11 @@ interface Props {
   bonus: number
   submitState: 'idle' | 'saving' | 'saved' | 'error'
   submitError: string | null
+  /** True when this run replaced the player's stored best for the game. */
+  isPersonalBest?: boolean
+  headline?: string
+  blurb?: string
+  movesLabel?: string
   onPlayAgain: () => void
   onExit: () => void
 }
@@ -30,6 +35,10 @@ export function WinModal({
   bonus,
   submitState,
   submitError,
+  isPersonalBest = false,
+  headline = 'YOU WIN!',
+  blurb,
+  movesLabel = 'Moves',
   onPlayAgain,
   onExit,
 }: Props) {
@@ -71,12 +80,8 @@ export function WinModal({
       <div className="overlay">
         <div className="panel modal">
           <div className="title-sup">CONGRATULATIONS</div>
-          <h2 className="win-title">YOU WIN!</h2>
-          <p>
-            {playerName} CLEARED THE TABLE
-            <br />
-            ALL 52 CARDS HOME
-          </p>
+          <h2 className="win-title">{headline}</h2>
+          <p>{blurb ?? `${playerName} CLEARED THE TABLE — ALL 52 CARDS HOME`}</p>
 
           <div className="final-stats">
             <div className="final-stat big">
@@ -102,14 +107,19 @@ export function WinModal({
               <span className="v">{formatTime(seconds)}</span>
             </div>
             <div className="final-stat">
-              <span className="k">Moves</span>
+              <span className="k">{movesLabel}</span>
               <span className="v">{moves}</span>
             </div>
           </div>
 
           <div className={`status-line ${submitState === 'error' ? 'error' : ''}`}>
             {submitState === 'saving' && <span className="blink">SAVING SCORE…</span>}
-            {submitState === 'saved' && <span className="neon-green">SCORE SAVED TO CABINET</span>}
+            {submitState === 'saved' &&
+              (isPersonalBest ? (
+                <span className="neon-yellow blink">★ NEW PERSONAL BEST ★</span>
+              ) : (
+                <span className="neon-green">SCORE BANKED — YOUR BEST STANDS</span>
+              ))}
             {submitState === 'error' && <span>COULD NOT SAVE — {submitError}</span>}
           </div>
 

@@ -2,17 +2,46 @@ export interface Player {
   id: number
   name: string
   created_at: string
+  /** Sum of the player's best in every game — what the arcade ranks on. */
+  total_score: number
+  /** Highest single-game best. */
   best_score: number
   games_won: number
   games_played: number
+  bests: Partial<Record<GameKey, number>>
 }
 
 export type Difficulty = 'easy' | 'medium' | 'hard'
 
+export type GameKey = 'solitaire' | 'sudoku'
+
+/** One row of the arcade table: a player, ranked on their combined total. */
 export interface LeaderboardEntry {
   rank: number
   player_id: number
   player_name: string
+  total_score: number
+  games_played: number
+  games_won: number
+  /** Best score per game, e.g. { solitaire: 3200, sudoku: 1800 }. */
+  bests: Partial<Record<GameKey, number>>
+}
+
+export interface ScoreSubmission {
+  player_id: number
+  game: GameKey
+  score: number
+  moves: number
+  duration_seconds: number
+  won: boolean
+  difficulty: Difficulty
+}
+
+export interface StoredScore {
+  id: number
+  player_id: number
+  player_name: string
+  game: GameKey
   score: number
   moves: number
   duration_seconds: number
@@ -21,13 +50,11 @@ export interface LeaderboardEntry {
   created_at: string
 }
 
-export interface ScoreSubmission {
-  player_id: number
-  score: number
-  moves: number
-  duration_seconds: number
-  won: boolean
-  difficulty: Difficulty
+/** Only a personal best is kept, so the API reports whether one was set. */
+export interface SubmitResult {
+  personal_best: boolean
+  submitted: number
+  best: StoredScore
 }
 
 export class ApiError extends Error {
@@ -91,7 +118,7 @@ export const api = {
   getPlayer: (id: number) => request<Player>(`/players/${id}`),
 
   submitScore: (submission: ScoreSubmission) =>
-    request<unknown>('/scores', { method: 'POST', body: JSON.stringify(submission) }),
+    request<SubmitResult>('/scores', { method: 'POST', body: JSON.stringify(submission) }),
 
   leaderboard: (limit = 5) => request<LeaderboardEntry[]>(`/leaderboard?limit=${limit}`),
 }

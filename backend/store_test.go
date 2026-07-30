@@ -95,7 +95,7 @@ func mustCreatePlayer(t *testing.T, s *Store, name string) *Player {
 func mustAddScore(t *testing.T, s *Store, playerID int64, score, moves, duration int, won bool) *Score {
 	t.Helper()
 
-	sc, err := s.AddScore(playerID, score, moves, duration, won, "medium")
+	sc, _, err := s.SubmitScore(playerID, "solitaire", score, moves, duration, won, "medium")
 	if err != nil {
 		t.Fatalf("AddScore(player=%d, score=%d) returned error: %v", playerID, score, err)
 	}
@@ -274,122 +274,190 @@ func TestGetPlayerUnknownID(t *testing.T) {
 
 // ---- AddScore ------------------------------------------------------------
 
-func TestAddScore(t *testing.T) {
+func TestSubmitScore(t *testing.T) {
 	t.Run("records a run for a known player", func(t *testing.T) {
 		store := newTestStore(t)
 		player := mustCreatePlayer(t, store, "ace")
 
-		got := mustAddScore(t, store, player.ID, 1200, 140, 95, true)
-		if got.ID <= 0 {
-			t.Errorf("Score.ID = %d, want a positive row id", got.ID)
+		sc, isBest, err := store.SubmitScore(player.ID, "solitaire", 1250, 90, 240, true, "hard")
+		if err != nil {
+			t.Fatalf("SubmitScore returned error: %v", err)
 		}
-		if got.PlayerID != player.ID {
-			t.Errorf("Score.PlayerID = %d, want %d", got.PlayerID, player.ID)
+		if !isBest {
+			t.Error("first run for a game should be a personal best")
 		}
-		if got.PlayerName != "ACE" {
-			t.Errorf("Score.PlayerName = %q, want %q", got.PlayerName, "ACE")
+		if sc.Score != 1250 || sc.Moves != 90 || sc.Duration != 240 || !sc.Won {
+			t.Errorf("stored %+v, want the submitted values", sc)
 		}
-		if got.Score != 1200 {
-			t.Errorf("Score.Score = %d, want %d", got.Score, 1200)
-		}
-		if got.Moves != 140 {
-			t.Errorf("Score.Moves = %d, want %d", got.Moves, 140)
-		}
-		if got.Duration != 95 {
-			t.Errorf("Score.Duration = %d, want %d", got.Duration, 95)
-		}
-		if !got.Won {
-			t.Errorf("Score.Won = %v, want %v", got.Won, true)
-		}
-		if got.CreatedAt == "" {
-			t.Error("Score.CreatedAt = \"\", want a non-empty timestamp")
+		if sc.Game != "solitaire" || sc.Difficulty != "hard" || sc.PlayerName != "ACE" {
+			t.Errorf("stored %+v, want game=solitaire difficulty=hard name=ACE", sc)
 		}
 	})
 
-	t.Run("records a lost run", func(t *testing.T) {
+	t.Run("a lower score neither replaces nor is stored", func(t *testing.T) {
 		store := newTestStore(t)
 		player := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, player.ID, "solitaire", 5000)
 
-		got := mustAddScore(t, store, player.ID, 10, 3, 2, false)
-		if got.Won {
-			t.Errorf("Score.Won = %v, want %v", got.Won, false)
+		best, isBest, err := store.SubmitScore(player.ID, "solitaire", 100, 1, 1, false, "easy")
+		if err != nil {
+			t.Fatalf("SubmitScore returned error: %v", err)
+		}
+		if isBest {
+			t.Error("100 should not beat 5000")
+		}
+		if best.Score != 5000 {
+			t.Errorf("returned best = %d, want the surviving 5000", best.Score)
+		}
+
+		// The weaker run must leave no trace at all.
+		rows, err := store.PlayerScores(player.ID, 50)
+		if err != nil {
+			t.Fatalf("PlayerScores: %v", err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("len(rows) = %d, want exactly 1 (bests only, no history)", len(rows))
+		}
+		if rows[0].Score != 5000 {
+			t.Errorf("kept score = %d, want 5000", rows[0].Score)
+		}
+	})
+
+	t.Run("an equal score does not replace", func(t *testing.T) {
+		store := newTestStore(t)
+		player := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, player.ID, "solitaire", 900)
+
+		_, isBest, err := store.SubmitScore(player.ID, "solitaire", 900, 1, 1, false, "easy")
+		if err != nil {
+			t.Fatalf("SubmitScore returned error: %v", err)
+		}
+		if isBest {
+			t.Error("an equal score should not count as a new best")
+		}
+	})
+
+	t.Run("a higher score replaces the stored best", func(t *testing.T) {
+		store := newTestStore(t)
+		player := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, player.ID, "solitaire", 900)
+
+		best, isBest, err := store.SubmitScore(player.ID, "solitaire", 4200, 120, 300, true, "hard")
+		if err != nil {
+			t.Fatalf("SubmitScore returned error: %v", err)
+		}
+		if !isBest {
+			t.Error("4200 should beat 900")
+		}
+		if best.Score != 4200 || best.Difficulty != "hard" || !best.Won {
+			t.Errorf("stored %+v, want the new run's values", best)
+		}
+
+		rows, _ := store.PlayerScores(player.ID, 50)
+		if len(rows) != 1 {
+			t.Errorf("len(rows) = %d, want 1 row still", len(rows))
+		}
+	})
+
+	t.Run("each game keeps its own best", func(t *testing.T) {
+		store := newTestStore(t)
+		player := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, player.ID, "solitaire", 3000)
+		mustSubmit(t, store, player.ID, "sudoku", 1500)
+
+		rows, err := store.PlayerScores(player.ID, 50)
+		if err != nil {
+			t.Fatalf("PlayerScores: %v", err)
+		}
+		if len(rows) != 2 {
+			t.Fatalf("len(rows) = %d, want one per game", len(rows))
+		}
+		// A weaker sudoku run must not disturb the solitaire best.
+		store.SubmitScore(player.ID, "sudoku", 10, 1, 1, false, "easy")
+		got, err := store.BestScore(player.ID, "solitaire")
+		if err != nil {
+			t.Fatalf("BestScore: %v", err)
+		}
+		if got.Score != 3000 {
+			t.Errorf("solitaire best = %d, want 3000", got.Score)
+		}
+	})
+
+	t.Run("an unknown game falls back to solitaire", func(t *testing.T) {
+		store := newTestStore(t)
+		player := mustCreatePlayer(t, store, "ace")
+		sc, _, err := store.SubmitScore(player.ID, "pinball", 10, 1, 1, false, "easy")
+		if err != nil {
+			t.Fatalf("SubmitScore: %v", err)
+		}
+		if sc.Game != "solitaire" {
+			t.Errorf("game = %q, want solitaire", sc.Game)
 		}
 	})
 
 	t.Run("unknown player id returns ErrPlayerNotFound", func(t *testing.T) {
 		store := newTestStore(t)
-		mustCreatePlayer(t, store, "ace") // make sure the table is not simply empty
+		mustCreatePlayer(t, store, "ace")
 
 		for _, id := range []int64{0, -1, 9999} {
-			sc, err := store.AddScore(id, 100, 10, 10, false, "medium")
+			sc, _, err := store.SubmitScore(id, "solitaire", 100, 10, 10, false, "medium")
 			if !errors.Is(err, ErrPlayerNotFound) {
-				t.Errorf("AddScore(playerID=%d) error = %v, want ErrPlayerNotFound", id, err)
+				t.Errorf("SubmitScore(playerID=%d) error = %v, want ErrPlayerNotFound", id, err)
 			}
 			if sc != nil {
-				t.Errorf("AddScore(playerID=%d) score = %+v, want nil", id, sc)
+				t.Errorf("SubmitScore(playerID=%d) score = %+v, want nil", id, sc)
 			}
 		}
 	})
+}
+
+// mustSubmit records a score and fails the test if it errors.
+func mustSubmit(t *testing.T, s *Store, playerID int64, game string, score int) *Score {
+	t.Helper()
+	sc, _, err := s.SubmitScore(playerID, game, score, 10, 100, true, "medium")
+	if err != nil {
+		t.Fatalf("SubmitScore(player=%d, game=%s, score=%d): %v", playerID, game, score, err)
+	}
+	return sc
 }
 
 func TestPlayerScores(t *testing.T) {
 	store := newTestStore(t)
 	ace := mustCreatePlayer(t, store, "ace")
-	bee := mustCreatePlayer(t, store, "bee")
+	zed := mustCreatePlayer(t, store, "zed")
+	mustSubmit(t, store, ace.ID, "solitaire", 900)
+	mustSubmit(t, store, ace.ID, "sudoku", 2500)
+	mustSubmit(t, store, zed.ID, "solitaire", 4000)
 
-	mustAddScore(t, store, ace.ID, 300, 30, 30, false)
-	mustAddScore(t, store, ace.ID, 900, 90, 90, true)
-	mustAddScore(t, store, ace.ID, 600, 60, 60, false)
-	mustAddScore(t, store, bee.ID, 1500, 10, 10, true)
-
-	t.Run("returns only that player's runs, best first", func(t *testing.T) {
-		got, err := store.PlayerScores(ace.ID, 0)
+	t.Run("returns only that player's bests, highest first", func(t *testing.T) {
+		rows, err := store.PlayerScores(ace.ID, 10)
 		if err != nil {
-			t.Fatalf("PlayerScores(%d, 0) returned error: %v", ace.ID, err)
+			t.Fatalf("PlayerScores: %v", err)
 		}
-		want := []int{900, 600, 300}
-		if len(got) != len(want) {
-			t.Fatalf("PlayerScores(%d, 0) returned %d rows, want %d (%+v)", ace.ID, len(got), len(want), got)
+		if len(rows) != 2 {
+			t.Fatalf("len(rows) = %d, want 2", len(rows))
 		}
-		for i, w := range want {
-			if got[i].Score != w {
-				t.Errorf("PlayerScores[%d].Score = %d, want %d", i, got[i].Score, w)
+		if rows[0].Score != 2500 || rows[1].Score != 900 {
+			t.Errorf("scores = %d, %d, want 2500 then 900", rows[0].Score, rows[1].Score)
+		}
+		for _, r := range rows {
+			if r.PlayerID != ace.ID {
+				t.Errorf("leaked another player's row: %+v", r)
 			}
-			if got[i].PlayerID != ace.ID {
-				t.Errorf("PlayerScores[%d].PlayerID = %d, want %d", i, got[i].PlayerID, ace.ID)
-			}
-		}
-	})
-
-	t.Run("honours the limit", func(t *testing.T) {
-		got, err := store.PlayerScores(ace.ID, 2)
-		if err != nil {
-			t.Fatalf("PlayerScores(%d, 2) returned error: %v", ace.ID, err)
-		}
-		if len(got) != 2 {
-			t.Fatalf("PlayerScores(%d, 2) returned %d rows, want 2", ace.ID, len(got))
 		}
 	})
 
 	t.Run("unknown player returns an empty slice", func(t *testing.T) {
-		got, err := store.PlayerScores(9999, 10)
+		rows, err := store.PlayerScores(9999, 10)
 		if err != nil {
-			t.Fatalf("PlayerScores(9999, 10) returned error: %v", err)
+			t.Fatalf("PlayerScores: %v", err)
 		}
-		if got == nil {
-			t.Fatal("PlayerScores(9999, 10) = nil, want an empty non-nil slice")
-		}
-		if len(got) != 0 {
-			t.Errorf("PlayerScores(9999, 10) returned %d rows, want 0", len(got))
+		if len(rows) != 0 {
+			t.Errorf("len(rows) = %d, want 0", len(rows))
 		}
 	})
 }
 
-// ---- Leaderboard ---------------------------------------------------------
-
-// seedLeaderboard inserts eight runs across three players. Every (score,
-// duration) pair is unique so the expected ordering never depends on
-// created_at, which only has one-second resolution.
 func seedLeaderboard(t *testing.T, store *Store) (ace, bee, cee *Player) {
 	t.Helper()
 
@@ -410,112 +478,110 @@ func seedLeaderboard(t *testing.T, store *Store) (ace, bee, cee *Player) {
 }
 
 func TestLeaderboard(t *testing.T) {
-	store := newTestStore(t)
-	ace, bee, cee := seedLeaderboard(t, store)
+	t.Run("ranks players by their combined total across games", func(t *testing.T) {
+		store := newTestStore(t)
 
-	type want struct {
-		score    int
-		duration int
-		player   int64
-	}
-	top5 := []want{
-		{score: 900, duration: 50, player: bee.ID}, // tie broken by shorter duration
-		{score: 900, duration: 100, player: ace.ID},
-		{score: 800, duration: 70, player: cee.ID},
-		{score: 700, duration: 80, player: bee.ID},
-		{score: 500, duration: 60, player: ace.ID},
-	}
+		// ACE wins on the combined total despite a lower solitaire best.
+		ace := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, ace.ID, "solitaire", 3000)
+		mustSubmit(t, store, ace.ID, "sudoku", 2500)
 
-	t.Run("defaults to five rows sorted by score desc", func(t *testing.T) {
-		got, err := store.Leaderboard(0)
+		zed := mustCreatePlayer(t, store, "zed")
+		mustSubmit(t, store, zed.ID, "solitaire", 4000)
+
+		nova := mustCreatePlayer(t, store, "nova")
+		mustSubmit(t, store, nova.ID, "sudoku", 1000)
+
+		entries, err := store.Leaderboard(5)
 		if err != nil {
-			t.Fatalf("Leaderboard(0) returned error: %v", err)
+			t.Fatalf("Leaderboard: %v", err)
 		}
-		if len(got) != 5 {
-			t.Fatalf("Leaderboard(0) returned %d entries, want 5 (%+v)", len(got), got)
+		if len(entries) != 3 {
+			t.Fatalf("len(entries) = %d, want 3 (one row per player)", len(entries))
 		}
-		for i, w := range top5 {
-			if got[i].Score != w.score {
-				t.Errorf("entry %d: Score = %d, want %d", i, got[i].Score, w.score)
+
+		want := []struct {
+			name  string
+			total int
+		}{{"ACE", 5500}, {"ZED", 4000}, {"NOVA", 1000}}
+		for i, w := range want {
+			if entries[i].PlayerName != w.name || entries[i].TotalScore != w.total {
+				t.Errorf("rank %d = %s/%d, want %s/%d",
+					i+1, entries[i].PlayerName, entries[i].TotalScore, w.name, w.total)
 			}
-			if got[i].Duration != w.duration {
-				t.Errorf("entry %d: Duration = %d, want %d", i, got[i].Duration, w.duration)
-			}
-			if got[i].PlayerID != w.player {
-				t.Errorf("entry %d: PlayerID = %d, want %d", i, got[i].PlayerID, w.player)
-			}
-			if got[i].Rank != i+1 {
-				t.Errorf("entry %d: Rank = %d, want %d", i, got[i].Rank, i+1)
-			}
-		}
-		// Scores must be non-increasing across the whole board.
-		for i := 1; i < len(got); i++ {
-			if got[i-1].Score < got[i].Score {
-				t.Errorf("entry %d score %d < entry %d score %d, want descending order",
-					i-1, got[i-1].Score, i, got[i].Score)
+			if entries[i].Rank != i+1 {
+				t.Errorf("entry %d rank = %d, want %d", i, entries[i].Rank, i+1)
 			}
 		}
 	})
 
-	t.Run("negative limit also defaults to five", func(t *testing.T) {
-		got, err := store.Leaderboard(-3)
+	t.Run("reports the per-game breakdown", func(t *testing.T) {
+		store := newTestStore(t)
+		ace := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, ace.ID, "solitaire", 3000)
+		mustSubmit(t, store, ace.ID, "sudoku", 2500)
+
+		entries, err := store.Leaderboard(5)
 		if err != nil {
-			t.Fatalf("Leaderboard(-3) returned error: %v", err)
+			t.Fatalf("Leaderboard: %v", err)
 		}
-		if len(got) != 5 {
-			t.Errorf("Leaderboard(-3) returned %d entries, want 5", len(got))
+		got := entries[0].Bests
+		if got["solitaire"] != 3000 || got["sudoku"] != 2500 {
+			t.Errorf("bests = %v, want solitaire=3000 sudoku=2500", got)
+		}
+		if entries[0].Games != 2 {
+			t.Errorf("games_played = %d, want 2", entries[0].Games)
 		}
 	})
 
-	t.Run("ties break by shorter duration first", func(t *testing.T) {
-		got, err := store.Leaderboard(2)
+	t.Run("a player appears once no matter how many runs", func(t *testing.T) {
+		store := newTestStore(t)
+		ace := mustCreatePlayer(t, store, "ace")
+		for _, score := range []int{100, 900, 400, 2000, 50} {
+			store.SubmitScore(ace.ID, "solitaire", score, 1, 1, false, "easy")
+		}
+
+		entries, err := store.Leaderboard(10)
 		if err != nil {
-			t.Fatalf("Leaderboard(2) returned error: %v", err)
+			t.Fatalf("Leaderboard: %v", err)
 		}
-		if len(got) != 2 {
-			t.Fatalf("Leaderboard(2) returned %d entries, want 2", len(got))
+		if len(entries) != 1 {
+			t.Fatalf("len(entries) = %d, want 1", len(entries))
 		}
-		if got[0].Score != got[1].Score {
-			t.Fatalf("expected the top two entries to be tied on score, got %d and %d",
-				got[0].Score, got[1].Score)
-		}
-		if got[0].Duration > got[1].Duration {
-			t.Errorf("tie ordering: entry 0 duration = %d, entry 1 duration = %d, want the shorter run first",
-				got[0].Duration, got[1].Duration)
-		}
-		if got[0].PlayerName != "BEE" {
-			t.Errorf("tie winner = %q, want %q (same score, shorter duration)", got[0].PlayerName, "BEE")
-		}
-		if got[1].PlayerName != "ACE" {
-			t.Errorf("tie runner-up = %q, want %q", got[1].PlayerName, "ACE")
+		if entries[0].TotalScore != 2000 {
+			t.Errorf("total = %d, want only the best run (2000)", entries[0].TotalScore)
 		}
 	})
 
-	t.Run("larger limit returns every run", func(t *testing.T) {
-		got, err := store.Leaderboard(50)
+	t.Run("players with no score are left off", func(t *testing.T) {
+		store := newTestStore(t)
+		mustCreatePlayer(t, store, "ghost")
+		ace := mustCreatePlayer(t, store, "ace")
+		mustSubmit(t, store, ace.ID, "solitaire", 10)
+
+		entries, err := store.Leaderboard(10)
 		if err != nil {
-			t.Fatalf("Leaderboard(50) returned error: %v", err)
+			t.Fatalf("Leaderboard: %v", err)
 		}
-		if len(got) != 8 {
-			t.Fatalf("Leaderboard(50) returned %d entries, want 8", len(got))
-		}
-		for i := range got {
-			if got[i].Rank != i+1 {
-				t.Errorf("entry %d: Rank = %d, want %d", i, got[i].Rank, i+1)
-			}
+		if len(entries) != 1 || entries[0].PlayerName != "ACE" {
+			t.Errorf("entries = %+v, want only ACE", entries)
 		}
 	})
 
-	t.Run("won flag round-trips", func(t *testing.T) {
-		got, err := store.Leaderboard(1)
-		if err != nil {
-			t.Fatalf("Leaderboard(1) returned error: %v", err)
+	t.Run("limit is honoured and defaults on nonsense", func(t *testing.T) {
+		store := newTestStore(t)
+		for i, name := range []string{"AAA", "BBB", "CCC", "DDD", "EEE", "FFF"} {
+			p := mustCreatePlayer(t, store, name)
+			mustSubmit(t, store, p.ID, "solitaire", (i+1)*100)
 		}
-		if len(got) != 1 {
-			t.Fatalf("Leaderboard(1) returned %d entries, want 1", len(got))
+		if got, _ := store.Leaderboard(2); len(got) != 2 {
+			t.Errorf("limit 2 returned %d rows", len(got))
 		}
-		if !got[0].Won {
-			t.Errorf("top entry Won = %v, want %v", got[0].Won, true)
+		if got, _ := store.Leaderboard(0); len(got) != 5 {
+			t.Errorf("limit 0 returned %d rows, want the default 5", len(got))
+		}
+		if got, _ := store.Leaderboard(-3); len(got) != 5 {
+			t.Errorf("negative limit returned %d rows, want the default 5", len(got))
 		}
 	})
 }
@@ -539,73 +605,55 @@ func TestLeaderboardEmpty(t *testing.T) {
 
 func TestPlayerAggregateColumns(t *testing.T) {
 	store := newTestStore(t)
-
 	ace := mustCreatePlayer(t, store, "ace")
-	bee := mustCreatePlayer(t, store, "bee")
-	zip := mustCreatePlayer(t, store, "zip") // never plays a game
+	mustSubmit(t, store, ace.ID, "solitaire", 3000)
+	mustSubmit(t, store, ace.ID, "sudoku", 2500)
+	// A losing run that is still a personal best for that game.
+	store.SubmitScore(ace.ID, "sudoku", 4000, 1, 1, false, "easy")
+	ghost := mustCreatePlayer(t, store, "ghost")
 
-	// ACE: 3 runs, 2 of them won, best score 900.
-	mustAddScore(t, store, ace.ID, 900, 90, 90, true)
-	mustAddScore(t, store, ace.ID, 500, 50, 50, true)
-	mustAddScore(t, store, ace.ID, 300, 30, 30, false)
-	// BEE: 2 runs, none won, best score 700.
-	mustAddScore(t, store, bee.ID, 700, 70, 70, false)
-	mustAddScore(t, store, bee.ID, 200, 20, 20, false)
-
-	t.Run("GetPlayer aggregates", func(t *testing.T) {
+	t.Run("total is the sum of per-game bests", func(t *testing.T) {
 		got, err := store.GetPlayer(ace.ID)
 		if err != nil {
-			t.Fatalf("GetPlayer(%d) returned error: %v", ace.ID, err)
+			t.Fatalf("GetPlayer: %v", err)
 		}
-		assertPlayerAggregates(t, got, 900, 3, 2)
+		if got.TotalScore != 7000 {
+			t.Errorf("total_score = %d, want 3000 + 4000", got.TotalScore)
+		}
+		if got.BestScore != 4000 {
+			t.Errorf("best_score = %d, want the single highest 4000", got.BestScore)
+		}
+		if got.Games != 2 {
+			t.Errorf("games_played = %d, want 2 games with a best", got.Games)
+		}
+		if got.Bests["solitaire"] != 3000 || got.Bests["sudoku"] != 4000 {
+			t.Errorf("bests = %v", got.Bests)
+		}
 	})
 
-	t.Run("GetPlayer with no scores reports zeroes", func(t *testing.T) {
-		got, err := store.GetPlayer(zip.ID)
+	t.Run("a player with no scores reports zeroes, not an error", func(t *testing.T) {
+		got, err := store.GetPlayer(ghost.ID)
 		if err != nil {
-			t.Fatalf("GetPlayer(%d) returned error: %v", zip.ID, err)
+			t.Fatalf("GetPlayer: %v", err)
 		}
-		if got.Name != "ZIP" {
-			t.Errorf("Name = %q, want %q", got.Name, "ZIP")
+		if got.TotalScore != 0 || got.BestScore != 0 || got.Games != 0 || got.GamesWon != 0 {
+			t.Errorf("unplayed player = %+v, want zeroed stats", got)
 		}
-		assertPlayerAggregates(t, got, 0, 0, 0)
+		if got.Bests == nil {
+			t.Error("bests should be an empty map, not nil")
+		}
 	})
 
-	t.Run("ListPlayers aggregates", func(t *testing.T) {
+	t.Run("ListPlayers orders by total", func(t *testing.T) {
 		players, err := store.ListPlayers()
 		if err != nil {
-			t.Fatalf("ListPlayers() returned error: %v", err)
+			t.Fatalf("ListPlayers: %v", err)
 		}
-		if len(players) != 3 {
-			t.Fatalf("ListPlayers() returned %d players, want 3 (%+v)", len(players), players)
+		if len(players) != 2 || players[0].Name != "ACE" {
+			t.Fatalf("players = %+v, want ACE first", players)
 		}
-
-		byName := map[string]Player{}
-		for _, p := range players {
-			byName[p.Name] = p
-		}
-		for _, tc := range []struct {
-			name                         string
-			wantBest, wantGames, wantWon int
-		}{
-			{"ACE", 900, 3, 2},
-			{"BEE", 700, 2, 0},
-			{"ZIP", 0, 0, 0},
-		} {
-			p, ok := byName[tc.name]
-			if !ok {
-				t.Errorf("ListPlayers() is missing player %q", tc.name)
-				continue
-			}
-			assertPlayerAggregates(t, &p, tc.wantBest, tc.wantGames, tc.wantWon)
-		}
-
-		// ORDER BY best_score DESC: ACE (900), BEE (700), ZIP (0).
-		wantOrder := []string{"ACE", "BEE", "ZIP"}
-		for i, want := range wantOrder {
-			if players[i].Name != want {
-				t.Errorf("ListPlayers()[%d].Name = %q, want %q", i, players[i].Name, want)
-			}
+		if players[0].TotalScore != 7000 {
+			t.Errorf("ACE total = %d, want 7000", players[0].TotalScore)
 		}
 	})
 }

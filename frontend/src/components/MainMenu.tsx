@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, Player, api } from '../api/client'
+import { DIFFICULTY_BLURB, GAMES, GAME_ORDER } from '../game/difficulty'
+import type { GameKey } from '../game/difficulty'
 import { DIFFICULTIES, DIFFICULTY_ORDER } from '../game/engine'
 import { sfx } from '../game/sound'
 import type { Difficulty } from '../game/types'
 import { Leaderboard } from './Leaderboard'
 
 interface Props {
-  onStart: (player: Player, difficulty: Difficulty) => void
+  onStart: (player: Player, game: GameKey, difficulty: Difficulty) => void
 }
 
 export function MainMenu({ onStart }: Props) {
@@ -18,6 +20,7 @@ export function MainMenu({ onStart }: Props) {
   const [creating, setCreating] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [difficulty, setDifficulty] = useState<Difficulty>('medium')
+  const [game, setGame] = useState<GameKey>('solitaire')
   const inputRef = useRef<HTMLInputElement>(null)
 
   const loadPlayers = useCallback(() => {
@@ -71,7 +74,7 @@ export function MainMenu({ onStart }: Props) {
   const handleStart = () => {
     if (!selected) return
     sfx.coin()
-    onStart(selected, difficulty)
+    onStart(selected, game, difficulty)
   }
 
   return (
@@ -79,8 +82,8 @@ export function MainMenu({ onStart }: Props) {
       <div className="menu-inner">
       <div className="title-block">
         <div className="title-sup">ANTHROPIC ARCADE PRESENTS</div>
-        <h1 className="title">SOLITAIRE</h1>
-        <div className="title-sub">KLONDIKE · DRAW ONE · 52 CARDS</div>
+        <h1 className="title">ARCADE</h1>
+        <div className="title-sub">{GAMES[game].tagline}</div>
       </div>
 
       <div className="menu-columns">
@@ -111,12 +114,12 @@ export function MainMenu({ onStart }: Props) {
                     onDoubleClick={() => {
                       handleSelect(player)
                       sfx.coin()
-                      onStart(player, difficulty)
+                      onStart(player, game, difficulty)
                     }}
                   >
                     <span className="cursor">{selected?.id === player.id ? '▶' : ''}</span>
                     <span className="pname">{player.name}</span>
-                    <span className="pbest">{String(player.best_score).padStart(5, '0')}</span>
+                    <span className="pbest">{String(player.total_score ?? 0).padStart(5, '0')}</span>
                   </button>
                 ))}
               </div>
@@ -148,11 +151,34 @@ export function MainMenu({ onStart }: Props) {
         {/* ---- leaderboard ---- */}
         <div className="panel">
           <div className="panel-head">
-            <span className="neon-yellow">★ TOP 5 HIGH SCORES ★</span>
+            <span className="neon-yellow">★ TOP 5 · COMBINED TOTAL ★</span>
           </div>
           <div className="panel-body">
             <Leaderboard limit={5} highlightName={selected?.name} refreshKey={refreshKey} />
           </div>
+        </div>
+      </div>
+
+      <div className="panel difficulty-panel">
+        <div className="panel-head">
+          <span>SELECT GAME</span>
+          <span className="neon-cyan">{GAMES[game].title}</span>
+        </div>
+        <div className="game-options">
+          {GAME_ORDER.map((key) => (
+            <button
+              key={key}
+              className={`game-option game-${key} ${game === key ? 'selected' : ''}`}
+              onClick={() => {
+                sfx.select()
+                setGame(key)
+              }}
+              aria-pressed={game === key}
+            >
+              <span className="game-title">{GAMES[key].title}</span>
+              <span className="game-tagline">{GAMES[key].tagline}</span>
+            </button>
+          ))}
         </div>
       </div>
 
@@ -178,7 +204,7 @@ export function MainMenu({ onStart }: Props) {
               >
                 <span className="diff-label">{spec.label}</span>
                 <span className="diff-bonus">x{spec.bonus}</span>
-                <span className="diff-blurb">{spec.blurb}</span>
+                <span className="diff-blurb">{DIFFICULTY_BLURB[game][key]}</span>
               </button>
             )
           })}
@@ -187,10 +213,14 @@ export function MainMenu({ onStart }: Props) {
 
       <div className="menu-actions">
         <button className="btn btn-yellow" onClick={handleStart} disabled={!selected}>
-          {selected ? `▶ START GAME — ${selected.name}` : 'SELECT A PLAYER TO START'}
+          {selected ? `▶ START ${GAMES[game].title} — ${selected.name}` : 'SELECT A PLAYER TO START'}
         </button>
         <div className="insert-coin blink">{selected ? 'PRESS START' : 'INSERT COIN'}</div>
-        <div className="credit-line">DRAG CARDS · DOUBLE-CLICK TO SEND HOME · H FOR HINT</div>
+        <div className="credit-line">
+          {game === 'solitaire'
+            ? 'DRAG CARDS · DOUBLE-CLICK TO SEND HOME · H FOR HINT'
+            : 'CLICK A CELL · 1-9 TO FILL · N FOR NOTES · H FOR HINT'}
+        </div>
       </div>
       </div>
     </div>

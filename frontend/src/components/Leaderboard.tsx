@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { LeaderboardEntry, api } from '../api/client'
-import { formatTime } from './Game'
+import { GAMES, GAME_ORDER } from '../game/difficulty'
 
 interface Props {
   limit?: number
@@ -10,6 +10,10 @@ interface Props {
   refreshKey?: unknown
 }
 
+/**
+ * The arcade table. Rows are players, not runs: each is ranked on the sum of
+ * their best score in every game, with the breakdown shown alongside.
+ */
 export function Leaderboard({ limit = 5, highlightName, refreshKey }: Props) {
   const [entries, setEntries] = useState<LeaderboardEntry[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -30,9 +34,7 @@ export function Leaderboard({ limit = 5, highlightName, refreshKey }: Props) {
     }
   }, [limit, refreshKey])
 
-  if (error) {
-    return <div className="status-line error">{error}</div>
-  }
+  if (error) return <div className="status-line error">{error}</div>
 
   if (!entries) {
     return (
@@ -59,31 +61,32 @@ export function Leaderboard({ limit = 5, highlightName, refreshKey }: Props) {
           <tr>
             <th>#</th>
             <th>Name</th>
-            <th title="Difficulty">Mode</th>
-            <th style={{ textAlign: 'right' }}>Score</th>
-            <th style={{ textAlign: 'right' }}>Time</th>
+            <th className="lb-breakdown-head">Per game</th>
+            <th style={{ textAlign: 'right' }}>Total</th>
           </tr>
         </thead>
         <tbody>
           {entries.map((entry) => (
             <tr
-              key={`${entry.player_id}-${entry.created_at}-${entry.rank}`}
+              key={entry.player_id}
               className={`lb-row lb-row-${entry.rank} ${
                 highlightName && entry.player_name === highlightName ? 'is-you' : ''
               }`}
             >
               <td className="lb-rank">{entry.rank}</td>
-              <td className="lb-name">
-                {entry.player_name}
-                {entry.won && <span className="lb-crown" title="Completed game"> ★</span>}
+              <td className="lb-name">{entry.player_name}</td>
+              <td className="lb-breakdown">
+                {GAME_ORDER.map((key) => {
+                  const best = entry.bests?.[key]
+                  if (!best) return null
+                  return (
+                    <span key={key} className={`game-chip game-${key}`} title={GAMES[key].title}>
+                      {GAMES[key].short} {best}
+                    </span>
+                  )
+                })}
               </td>
-              <td className="lb-diff">
-                <span className={`diff-chip diff-${entry.difficulty}`}>
-                  {entry.difficulty.slice(0, 1).toUpperCase()}
-                </span>
-              </td>
-              <td className="lb-score">{String(entry.score).padStart(5, '0')}</td>
-              <td className="lb-time">{formatTime(entry.duration_seconds)}</td>
+              <td className="lb-score">{String(entry.total_score).padStart(5, '0')}</td>
             </tr>
           ))}
         </tbody>

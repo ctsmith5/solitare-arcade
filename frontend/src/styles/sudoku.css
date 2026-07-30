@@ -1,0 +1,298 @@
+/* ==================================================================
+   SUDOKU — grid, number pad, and the arcade game picker
+   ================================================================== */
+
+.sudoku-table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px clamp(12px, 3vw, 40px) 40px;
+  background:
+    radial-gradient(ellipse 70% 55% at 50% 0%, rgba(90, 140, 255, 0.16), transparent 70%),
+    linear-gradient(165deg, #182a52 0%, #0d1730 55%, #070d1e 100%);
+  box-shadow: inset 0 0 140px rgba(0, 0, 0, 0.72);
+}
+
+.sudoku-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: center;
+  gap: clamp(16px, 3vw, 34px);
+  margin: 0 auto;
+  width: fit-content;
+}
+
+/* ---------- the grid ---------------------------------------------- */
+
+.sudoku-grid {
+  --cell: clamp(30px, 8.4vmin, 58px);
+  display: grid;
+  grid-template-columns: repeat(9, var(--cell));
+  grid-template-rows: repeat(9, var(--cell));
+  gap: 0;
+  background: rgba(0, 240, 255, 0.55);
+  border: 3px solid var(--neon-cyan);
+  border-radius: 4px;
+  padding: 2px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.8),
+    0 0 34px rgba(0, 240, 255, 0.25),
+    0 18px 50px rgba(0, 0, 0, 0.6);
+}
+
+.sud-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(0, 240, 255, 0.16);
+  background: rgba(8, 14, 34, 0.94);
+  color: var(--neon-cyan);
+  font-family: var(--font-arcade);
+  font-size: calc(var(--cell) * 0.44);
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  transition:
+    background 0.1s ease,
+    color 0.1s ease;
+}
+
+/* The 3x3 box seams. */
+.sud-cell.box-right {
+  border-right: 2px solid var(--neon-cyan);
+}
+.sud-cell.box-bottom {
+  border-bottom: 2px solid var(--neon-cyan);
+}
+
+/* Givens are the puzzle; entered digits are yours. */
+.sud-cell.given {
+  color: #cfe3ff;
+  background: rgba(16, 26, 56, 0.96);
+  cursor: default;
+  text-shadow: 0 0 8px rgba(160, 200, 255, 0.4);
+}
+
+.sud-cell.entered {
+  color: var(--neon-green);
+  text-shadow: 0 0 10px rgba(57, 255, 20, 0.5);
+}
+
+.sud-cell.peer {
+  background: rgba(0, 240, 255, 0.09);
+}
+
+.sud-cell.same-digit {
+  background: rgba(255, 212, 0, 0.16);
+  color: var(--neon-yellow);
+}
+
+.sud-cell.selected {
+  background: rgba(0, 240, 255, 0.28);
+  box-shadow: inset 0 0 0 2px var(--neon-cyan);
+  z-index: 2;
+}
+
+.sud-cell.wrong {
+  color: var(--neon-magenta);
+  background: rgba(255, 46, 151, 0.2);
+  text-shadow: 0 0 10px rgba(255, 46, 151, 0.7);
+}
+
+.sud-cell:hover:not(.given) {
+  background: rgba(0, 240, 255, 0.18);
+}
+
+.sud-digit {
+  pointer-events: none;
+}
+
+/* ---------- pencil marks ------------------------------------------ */
+
+.sud-notes {
+  position: absolute;
+  inset: 2px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  font-size: calc(var(--cell) * 0.19);
+  color: rgba(160, 190, 240, 0.75);
+  pointer-events: none;
+}
+
+.sud-notes span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sud-notes .on {
+  color: var(--neon-purple);
+  text-shadow: 0 0 6px rgba(168, 85, 247, 0.6);
+}
+
+/* ---------- number pad -------------------------------------------- */
+
+.sudoku-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  width: min(260px, 100%);
+  align-content: start;
+}
+
+.pad-key {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 12px 0;
+  font-family: var(--font-arcade);
+  color: var(--neon-cyan);
+  background: linear-gradient(180deg, rgba(0, 240, 255, 0.14), rgba(0, 240, 255, 0.04));
+  border: 2px solid var(--neon-cyan);
+  border-radius: 4px;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.7) inset,
+    0 4px 0 rgba(0, 120, 140, 0.5);
+  transition:
+    transform 0.08s ease,
+    background 0.14s ease;
+}
+
+.pad-key:hover:not(:disabled) {
+  background: linear-gradient(180deg, rgba(0, 240, 255, 0.3), rgba(0, 240, 255, 0.1));
+}
+
+.pad-key:active:not(:disabled) {
+  transform: translateY(3px);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.7) inset,
+    0 1px 0 rgba(0, 120, 140, 0.5);
+}
+
+.pad-key:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* All nine placed — nothing left to enter. */
+.pad-key.done {
+  opacity: 0.3;
+  border-color: rgba(111, 106, 153, 0.6);
+  color: var(--ink-dim);
+}
+
+.pad-key.wide {
+  grid-column: span 3;
+}
+
+.pad-digit {
+  font-size: 20px;
+}
+
+.pad-left {
+  font-size: 7px;
+  letter-spacing: 0.1em;
+  color: var(--ink-dim);
+}
+
+/* ==================================================================
+   GAME PICKER
+   ================================================================== */
+
+.game-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 14px;
+}
+
+@media (max-width: 620px) {
+  .game-options {
+    grid-template-columns: 1fr;
+  }
+}
+
+.game-option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 14px;
+  text-align: left;
+  color: var(--ink-dim);
+  background: rgba(255, 255, 255, 0.03);
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  transition:
+    border-color 0.14s ease,
+    background 0.14s ease,
+    transform 0.08s ease;
+}
+
+.game-option:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.game-solitaire {
+  --accent: var(--neon-green);
+}
+.game-sudoku {
+  --accent: var(--neon-purple);
+}
+
+.game-option.selected {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.6) inset,
+    0 0 22px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.game-title {
+  font-size: 15px;
+  letter-spacing: 0.12em;
+}
+
+.game-option.selected .game-title {
+  text-shadow: 0 0 12px var(--accent);
+}
+
+.game-tagline {
+  font-size: 8px;
+  line-height: 1.7;
+  letter-spacing: 0.06em;
+  color: var(--ink-dim);
+}
+
+/* ---------- leaderboard breakdown chips ---------------------------- */
+
+.lb-breakdown-head {
+  text-align: left;
+}
+
+.lb-breakdown {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding: 8px 6px;
+}
+
+.game-chip {
+  display: inline-block;
+  padding: 2px 5px;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}

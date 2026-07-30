@@ -116,6 +116,7 @@ func (a *API) playerScores(w http.ResponseWriter, r *http.Request) {
 func (a *API) createScore(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PlayerID   int64  `json:"player_id"`
+		Game       string `json:"game"`
 		Score      int    `json:"score"`
 		Moves      int    `json:"moves"`
 		Duration   int    `json:"duration_seconds"`
@@ -135,7 +136,8 @@ func (a *API) createScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	score, err := a.store.AddScore(body.PlayerID, body.Score, body.Moves, body.Duration, body.Won, body.Difficulty)
+	stored, isBest, err := a.store.SubmitScore(body.PlayerID, body.Game, body.Score,
+		body.Moves, body.Duration, body.Won, body.Difficulty)
 	if errors.Is(err, ErrPlayerNotFound) {
 		writeErr(w, http.StatusNotFound, "player not found")
 		return
@@ -144,7 +146,18 @@ func (a *API) createScore(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "could not save score")
 		return
 	}
-	writeJSON(w, http.StatusCreated, score)
+
+	// 201 when the run replaced the player's best, 200 when the existing best
+	// survived, so the client can tell whether anything was actually written.
+	status := http.StatusOK
+	if isBest {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{
+		"personal_best": isBest,
+		"submitted":     body.Score,
+		"best":          stored,
+	})
 }
 
 func (a *API) leaderboard(w http.ResponseWriter, r *http.Request) {

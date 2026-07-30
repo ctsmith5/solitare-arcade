@@ -53,6 +53,7 @@ export function Game({ player, difficulty, onExit }: Props) {
   const [submitState, setSubmitState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [scoreBump, setScoreBump] = useState(false)
+  const [isPersonalBest, setIsPersonalBest] = useState(false)
 
   const submitted = useRef(false)
   const faceUpSeen = useRef<Set<string>>(new Set())
@@ -292,13 +293,17 @@ export function Game({ player, difficulty, onExit }: Props) {
       api
         .submitScore({
           player_id: player.id,
+          game: 'solitaire',
           score: points,
           moves: stateRef.current.moves,
           duration_seconds: elapsedSeconds(stateRef.current),
           won: didWin,
           difficulty,
         })
-        .then(() => setSubmitState('saved'))
+        .then((result) => {
+          setIsPersonalBest(result.personal_best)
+          setSubmitState('saved')
+        })
         .catch((error: Error) => {
           setSubmitState('error')
           setSubmitError(error.message)
@@ -329,6 +334,7 @@ export function Game({ player, difficulty, onExit }: Props) {
       try {
         await api.submitScore({
           player_id: player.id,
+          game: 'solitaire',
           score: state.score,
           moves: state.moves,
           duration_seconds: elapsedSeconds(state),
@@ -451,6 +457,7 @@ export function Game({ player, difficulty, onExit }: Props) {
           bonus={spec.bonus}
           submitState={submitState}
           submitError={submitError}
+          isPersonalBest={isPersonalBest}
           onPlayAgain={handleNewGame}
           onExit={onExit}
         />

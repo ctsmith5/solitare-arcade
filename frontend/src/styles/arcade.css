@@ -747,7 +747,7 @@ button {
 
 .hud-stats {
   display: flex;
-  gap: 22px;
+  gap: clamp(12px, 1.6vw, 22px);
   flex-wrap: wrap;
 }
 
@@ -755,7 +755,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  min-width: 74px;
+  min-width: 58px;
 }
 
 .stat-label {

@@ -1,7 +1,8 @@
-# 🕹 Solitaire Arcade
+# 🕹 Arcade
 
-Klondike Solitaire (draw one, standard 52-card deck) with drag-and-drop play,
-a Go + Postgres backend for players and scores, and an arcade-cabinet front end.
+Two games — **Klondike Solitaire** (draw one, 52-card deck, drag and drop) and
+**Sudoku** (uniquely-solvable puzzles, three difficulties) — sharing one player
+roster, one score model and one arcade-cabinet shell, on a Go + Postgres backend.
 
 ```
 solitare/
@@ -12,7 +13,7 @@ solitare/
 │   └── *_test.go     store + endpoint tests
 └── frontend/         React 18 + TypeScript + Vite
     └── src/
-        ├── game/     rules engine, drag controller, sound, metrics
+        ├── game/     solitaire engine, sudoku engine, drag controller, sound
         ├── components/  menu, board, cards, HUD, leaderboard, win screen
         ├── api/       typed client for the Go API
         └── styles/    arcade shell + playing-card artwork
@@ -73,6 +74,21 @@ The engine suite covers deck integrity, the deal, every placement rule, the
 scoring table, stock recycling, auto-complete, and win detection — plus 30
 seeded full playthroughs asserting that cards are never lost, duplicated, or
 illegally revealed.
+
+## Scoring across the arcade
+
+The leaderboard ranks **players**, not runs, on their **combined total**: their
+best score in each game, summed. A run is only stored if it beats your existing
+best for that game — weaker runs are reported back and discarded, never written.
+
+That makes the `scores` table one row per player per game, so the arcade total
+is a `SUM` over it rather than something recomputed from a history. The API
+answers every submission with `personal_best`, and returns `201` when the run
+replaced your best or `200` when the old one survived.
+
+Both games use the same difficulty multipliers (×1 / ×1.6 / ×2.5) so a hard run
+is worth the same premium whichever cabinet you play, and both are tuned to land
+a good win in roughly the same 2,500–5,000 range.
 
 ## How to play
 
@@ -158,7 +174,41 @@ returns a playable deal; the odds of ever needing that fallback are below
 The multiplier scales base points **and** the time bonus, and is recorded with
 every run so the leaderboard can show which mode a score came from.
 
-### Scoring
+### Sudoku
+
+| Action | Control |
+| --- | --- |
+| Select a cell | Click, or the arrow keys |
+| Enter a digit | <kbd>1</kbd>–<kbd>9</kbd>, or the number pad |
+| Erase | <kbd>Backspace</kbd> |
+| Pencil marks | <kbd>N</kbd> toggles note mode |
+| Hint | <kbd>H</kbd> — reveals a cell, costs 75 |
+| Undo | <kbd>U</kbd> or <kbd>⌘Z</kbd> |
+
+Every puzzle is generated with a **guaranteed unique solution**: a full grid is
+built by randomised backtracking, then clues are removed one at a time and a
+removal is kept only when the puzzle still solves exactly one way. Difficulty is
+how many clues survive — easy 36–45, medium 30–35, hard 25–29, never below the
+17-clue minimum. Generation takes about a millisecond.
+
+Wrong digits are allowed onto the board, because seeing the clash is how you
+notice the mistake — they just cost points.
+
+**Sudoku scoring**
+
+| Event | Points |
+| --- | --- |
+| Cell solved correctly | +12, paid once per cell |
+| Mistake | −20 |
+| Hint | −75 |
+| Completing the grid | +400 |
+
+The time bonus is `400000 / seconds`, **scaled by the share of blanks you worked
+out yourself**. Without that scaling, hint-spamming is the highest-scoring
+strategy — the per-hint penalty floors at zero while a fast finish pays a bonus
+that dwarfs everything else. A grid you revealed entirely earns no time bonus.
+
+### Solitaire scoring
 
 | Event | Points |
 | --- | --- |
@@ -187,8 +237,8 @@ to uppercase and limited to 1–12 characters of `A–Z 0–9`, space, `-` and `
 | `POST` | `/api/players` | Create a player — `{"name": "ZED"}`. Returns `201`; an existing handle returns `200` with that player, so creating and selecting are the same gesture |
 | `GET` | `/api/players/{id}` | One player with aggregates |
 | `GET` | `/api/players/{id}/scores` | That player's runs, best first (`?limit=`) |
-| `POST` | `/api/scores` | Save a run — `{"player_id":1,"score":1250,"moves":90,"duration_seconds":240,"won":true,"difficulty":"hard"}` |
-| `GET` | `/api/leaderboard` | Top runs, ranked (`?limit=`, default 5) |
+| `POST` | `/api/scores` | Offer a run — `{"player_id":1,"game":"sudoku","score":1250,"moves":90,"duration_seconds":240,"won":true,"difficulty":"hard"}`. Returns `{personal_best, submitted, best}`; `201` if it replaced your best, `200` if not |
+| `GET` | `/api/leaderboard` | Players ranked by combined total, with a per-game breakdown (`?limit=`, default 5) |
 
 ```bash
 curl -X POST localhost:8080/api/players -d '{"name":"zed"}'
@@ -202,11 +252,21 @@ is the only required setting:
 
 ```sql
 players(id, name UNIQUE, created_at)
-scores(id, player_id → players.id, score, moves, duration_seconds, won, difficulty, created_at)
+scores(id, player_id → players.id, game, score, moves, duration_seconds, won, difficulty, created_at)
+  UNIQUE (player_id, game)
 ```
 
-Leaderboard rows are individual runs, ordered by score descending, then by
-shorter duration, then by earliest submission.
+`game` is `solitaire` or `sudoku`. The unique constraint is what enforces
+"personal bests only" — submissions upsert with
+`ON CONFLICT (player_id, game) DO UPDATE ... WHERE EXCLUDED.score > scores.score`,
+so a weaker run matches no row and writes nothing.
+
+Databases from before the arcade held a full run history. Startup collapses each
+player down to their best per game (earliest row wins a tie) before creating the
+unique index, so upgrading in place is safe.
+
+Leaderboard rows are players, ordered by combined total descending then by name.
+Players with no score at all are left off.
 
 Handles are stored upper-cased by `NormalizeName`, so a plain `UNIQUE`
 constraint gives case-insensitive names without a `citext` column.
